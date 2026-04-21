@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: smg-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smg
+      POSTGRES_USER: smg
+      POSTGRES_PASSWORD: smg123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smg -d smg"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: smg-redis
@@ -23,10 +39,10 @@ services:
       NODE_ENV: production
       PORT: 3344
       REDIS_URL: redis://redis:6379
-      DATABASE_URL: file:./storage/dev.db
-    volumes:
-      - backend_storage:/app/storage
+      DATABASE_URL: postgresql://smg:smg123@postgres:5432/smg?schema=public
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     expose:
@@ -42,8 +58,8 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      - "${SMG_FRONTEND_PORT:-8088}:80"
 
 volumes:
+  postgres_data:
   redis_data:
-  backend_storage:
