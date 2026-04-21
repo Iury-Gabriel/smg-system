@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: smg-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend-smg-system
+    container_name: smg-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend-smg-system/.env
+    environment:
+      NODE_ENV: production
+      PORT: 3344
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: file:./storage/dev.db
+    volumes:
+      - backend_storage:/app/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose:
+      - "3344"
+
+  frontend:
+    build:
+      context: ./frontend-smg
+      args:
+        VITE_SMG_API_URL: /api
+    container_name: smg-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  redis_data:
+  backend_storage:
