@@ -45,6 +45,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./backend-smg-system/.env:/app/.env
     ports:
       - "${SMG_BACKEND_PORT:-3344}:3344"
     expose:

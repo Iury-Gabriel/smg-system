@@ -3,7 +3,9 @@ const path = require("path");
 const env = require("../../config/env");
 const { getAgentOrThrow, invalidateAgentsCache } = require("./registry.service");
 
-const ENV_FILE_PATH = path.join(process.cwd(), ".env");
+const ENV_FILE_PATH = path.resolve(
+  String(process.env.AGENT_SETUP_ENV_FILE_PATH || path.join(process.cwd(), ".env"))
+);
 
 function toEnvSafeSlug(slug) {
   return String(slug || "")
