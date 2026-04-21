@@ -9,7 +9,7 @@ const env = {
   databaseUrl:
     process.env.DATABASE_URL ||
     process.env.DATABASE_URL_SMG ||
-    "file:./dev.db",
+    "postgresql://smg:smg123@localhost:5432/smg?schema=public",
   defaultWorkflow: String(process.env.DEFAULT_WORKFLOW || "smg")
     .trim()
     .toLowerCase(),

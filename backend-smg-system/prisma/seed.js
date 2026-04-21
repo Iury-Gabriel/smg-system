@@ -8,7 +8,9 @@ const WORKFLOW_SMG = "smg";
 const WORKFLOW_BSB = "bsb";
 
 const DEFAULT_DATABASE_URL =
-  process.env.DATABASE_URL || process.env.DATABASE_URL_SMG || "file:./dev.db";
+  process.env.DATABASE_URL ||
+  process.env.DATABASE_URL_SMG ||
+  "postgresql://smg:smg123@localhost:5432/smg?schema=public";
 
 const SMG_SEGMENTS = [
   { segment: LeadSegment.dentista, displayName: "Dentistas" },

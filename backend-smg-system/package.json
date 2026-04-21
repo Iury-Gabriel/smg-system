@@ -2,7 +2,7 @@
   "name": "backend-smg-system",
   "version": "1.0.0",
   "private": true,
-  "description": "SMG Scrap backend with BullMQ + Prisma + SQLite",
+  "description": "SMG Scrap backend with BullMQ + Prisma + PostgreSQL",
   "main": "src/server.js",
   "scripts": {
     "dev": "nodemon src/server.js",

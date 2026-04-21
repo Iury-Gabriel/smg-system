@@ -25,6 +25,7 @@ cd backend-smg-system
 cp .env.example .env
 npm install
 npx prisma generate
+npx prisma migrate deploy
 npx prisma db push
 npm run seed
 ```
@@ -64,7 +65,7 @@ Ou seja:
 
 Variaveis principais:
 
-- `DATABASE_URL` (default: `file:./dev.db`)
+- `DATABASE_URL` (default: `postgresql://smg:smg123@localhost:5432/smg?schema=public`)
 - `DEFAULT_WORKFLOW` (default: `smg`)
 
 O backend resolve o workflow por `workflow=smg|bsb` (query/body).

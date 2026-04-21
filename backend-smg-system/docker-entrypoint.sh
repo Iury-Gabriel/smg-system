@@ -1,21 +1,23 @@
 #!/bin/sh
 set -eu
 
-RUNTIME_SCHEMA_PATH="prisma/schema.runtime.prisma"
-
-echo "[backend] preparando schema Prisma para PostgreSQL..."
-sed 's/provider = "sqlite"/provider = "postgresql"/' prisma/schema.prisma > "$RUNTIME_SCHEMA_PATH"
-
 echo "[backend] gerando cliente Prisma..."
-npx prisma generate --schema "$RUNTIME_SCHEMA_PATH"
+npm run prisma:generate
 
-echo "[backend] aplicando migrations (prisma migrate deploy)..."
-if ! npx prisma migrate deploy --schema "$RUNTIME_SCHEMA_PATH"; then
-  echo "[backend] migrate deploy falhou, aplicando fallback com prisma db push..."
+if [ -f "prisma/migrations/migration_lock.toml" ] && grep -q 'provider = "postgresql"' prisma/migrations/migration_lock.toml; then
+  echo "[backend] aplicando migrations (prisma migrate deploy)..."
+  if ! npx prisma migrate deploy; then
+    echo "[backend] migrate deploy falhou, aplicando fallback com prisma db push..."
+  fi
+else
+  echo "[backend] migrations sqlite detectadas, pulando migrate deploy e usando db push para PostgreSQL..."
 fi
 
 echo "[backend] sincronizando schema (prisma db push)..."
-npx prisma db push --schema "$RUNTIME_SCHEMA_PATH"
+npm run prisma:push
+
+echo "[backend] executando seed inicial..."
+npm run seed
 
 echo "[backend] iniciando server + worker..."
 exec npm run start
