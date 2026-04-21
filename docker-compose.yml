@@ -47,6 +47,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    ports:
+      - "${SMG_BACKEND_PORT:-3344}:3344"
     expose:
       - "3344"
 
