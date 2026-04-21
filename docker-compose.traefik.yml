@@ -1,0 +1,20 @@
+services:
+  backend:
+    environment:
+      PUBLIC_WEBHOOK_BASE_URL: https://${SMG_API_DOMAIN:-api-smg.iurygabriel.xyz}
+    networks:
+      - default
+      - traefik_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.smg-api.rule=Host(`${SMG_API_DOMAIN:-api-smg.iurygabriel.xyz}`)
+      - traefik.http.routers.smg-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.smg-api.tls=true
+      - traefik.http.routers.smg-api.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.smg-api.loadbalancer.server.port=3344
+
+networks:
+  traefik_proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik-public}
