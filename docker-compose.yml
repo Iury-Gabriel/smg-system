@@ -40,6 +40,8 @@ services:
       PORT: 3344
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://smg:smg123@postgres:5432/smg?schema=public
+      ALLOW_OUTBOUND_MESSAGES: "false"
+      WF2_ENABLE_OUTBOUND_START: "false"
     depends_on:
       postgres:
         condition: service_healthy

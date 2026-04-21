@@ -58,10 +58,9 @@ const env = {
     10,
     Number(process.env.WF2_POLL_INTERVAL_SECONDS || 30)
   ),
-  wf2EnableOutboundStart:
-    String(process.env.WF2_ENABLE_OUTBOUND_START || "true").toLowerCase() === "true",
-  allowOutboundMessages:
-    String(process.env.ALLOW_OUTBOUND_MESSAGES || "true").toLowerCase() === "true",
+  // Hard block: outbound desativado no projeto por seguranca operacional.
+  wf2EnableOutboundStart: false,
+  allowOutboundMessages: false,
   agentRegistryHotReload:
     String(process.env.AGENT_REGISTRY_HOT_RELOAD || "false").toLowerCase() === "true",
   enableWebsiteEnrichment:
