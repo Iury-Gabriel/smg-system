@@ -763,6 +763,90 @@ async function handleInboundToken({
   };
 }
 
+function normalizeInboundProfileName(profileName) {
+  const normalized = textOrEmpty(profileName).replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (/^[._-]+$/.test(normalized)) return "";
+  return normalized;
+}
+
+function buildInboundCompanyName(phoneNumber) {
+  const digits = String(phoneNumber || "").replace(/[^\d]/g, "");
+  if (!digits) return `Lead Inbound ${crypto.randomUUID().slice(0, 8)}`;
+  return `Lead Inbound ${digits.slice(-8)}`;
+}
+
+async function createInboundLeadFromMessage({
+  workflow,
+  prisma,
+  tables,
+  agentSlug,
+  provider,
+  phoneNumber,
+  messageText,
+  profileName,
+}) {
+  const normalizedPhone = normalizeE164(phoneNumber);
+  if (!normalizedPhone) {
+    return null;
+  }
+
+  const inboundName = normalizeInboundProfileName(profileName) || "Lead Inbound WhatsApp";
+  const nowIso = new Date().toISOString();
+  const payload = {
+    id: crypto.randomUUID(),
+    nome: inboundName,
+    telefone: normalizedPhone,
+    empresa: buildInboundCompanyName(normalizedPhone),
+    segmento: asLeadSegment("outro"),
+    endereco: "Nao informado",
+    site: null,
+    email: null,
+    fonteOrigem: ScrapeSource.manual,
+    agentSlug: textOrEmpty(agentSlug || "default-sdr"),
+    status: "NOVO_LEAD",
+    pipelineOrigin: "inbound_whatsapp",
+    canalAquisicao: "inbound_whatsapp",
+    automationActive: true,
+    formularioPreenchido: false,
+    ultimaInteracao: new Date(),
+    dadosBrutos: mergeDadosBrutos(null, {
+      wf2: {
+        inboundLeadCreatedAt: nowIso,
+        firstInboundText: clipText(messageText, 500),
+        firstInboundProvider: normalizeProvider(provider) || provider || null,
+        firstInboundProfileName: textOrEmpty(profileName),
+      },
+    }),
+  };
+
+  try {
+    const lead = await tables.lead.create({
+      data: payload,
+    });
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: lead.id,
+      tipo: "lead_inbound_criado",
+      etapa: "inbound",
+      direcao: "system",
+      mensagem: "Lead criado automaticamente a partir de primeira mensagem inbound no WhatsApp.",
+      metadata: {
+        phoneNumber: normalizedPhone,
+        provider: normalizeProvider(provider) || provider || null,
+      },
+    });
+
+    return lead;
+  } catch (error) {
+    if (String(error?.code || "") === "P2002") {
+      return findLeadByPhone(tables, normalizedPhone, agentSlug);
+    }
+    throw error;
+  }
+}
+
 async function registerInboundMessageEvent({
   agentSlug,
   workflow: workflowInput,
@@ -811,11 +895,34 @@ async function registerInboundMessageEvent({
       phoneNumber: normalizeE164(phoneNumber) || phoneNumber || null,
       agentSlug: textOrEmpty(agentSlug),
     });
-    return {
-      foundLead: false,
-      suppressAi: false,
-      reason: "lead_not_found",
-    };
+    lead = await createInboundLeadFromMessage({
+      workflow,
+      prisma,
+      tables,
+      agentSlug,
+      provider,
+      phoneNumber,
+      messageText,
+      profileName,
+    });
+
+    if (!lead) {
+      return {
+        foundLead: false,
+        suppressAi: false,
+        reason: "lead_not_found",
+      };
+    }
+
+    logWf2("info", "inbound.message.lead_created", {
+      explanation:
+        "Lead nao existia e foi criado automaticamente a partir da mensagem inbound.",
+      workflow,
+      leadId: lead.id,
+      phoneNumber: lead.telefone,
+      agentSlug: lead.agentSlug,
+      pipelineOrigin: lead.pipelineOrigin,
+    });
   }
 
   const updatedLead = await tables.lead.update({
