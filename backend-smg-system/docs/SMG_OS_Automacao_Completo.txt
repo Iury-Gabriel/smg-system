@@ -1,0 +1,854 @@
+
+--- PAGE 1 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 1
+ SMG OS
+ Smart Management Group
+ Arquitetura da Automação
+ N8N + WhatsApp API (Meta) + IA
+ Outbound (Scrap SMG) + Inbound (Site / Instagram)
+ Documento técnico para o time de desenvolvimento
+ Abril 2026 — Confidencial
+
+
+--- PAGE 2 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 2
+1. Visão Geral
+O módulo de automação tem um único objetivo: converter leads em diagnósticos agendados, sem
+intervenção humana. Todo o fluxo conversacional é conduzido por IA via WhatsApp. O sistema opera com
+dois tipos de lead — outbound (prospecção ativa) e inbound (chegada por iniciativa própria) — e dois
+workflows independentes.
+1.1 Stack técnica
+Componente
+Tecnologia
+Detalhe
+Orquestração
+N8N
+Self-hosted em VPS. Gerencia todos os workflows, gatilhos e
+integrações.
+Mensageria
+WhatsApp Business
+API
+API oficial da Meta. Envio e recebimento de mensagens.
+Inteligência
+LLM via API
+Classificação de intenção, geração de respostas e geração da
+Análise de Maturidade em PDF.
+Base de
+dados
+Supabase
+(PostgreSQL)
+Fonte única de verdade. N8N lê e escreve via REST API ou
+Supabase JS Client.
+Fontes de
+leads
+Google Maps,
+LinkedIn, Instagram e
+outros canais B2B
+Acessados diretamente pelo Workflow 1 (Scrap SMG).
+1.2 Dois workflows independentes
+Workfl
+ow
+Nome
+Responsabilidade
+Interage com lead?
+WF1
+Scrap SMG
+Busca leads nas fontes, aplica ICP, insere em
+leads_automacao
+Não
+WF2
+Qualificação
+Conduz toda a conversa WhatsApp para outbound e
+inbound, avança status, agenda diagnóstico
+Sim — 100%
+automatizado
+1.3 Dois tipos de lead — um único WF2
+Tipo
+Origem
+Status de entrada
+Ponto de entrada no WF2
+Outbound
+Scrap SMG (Google Maps,
+LinkedIn, Instagram)
+NOVO_LEAD
+Etapa 1 — Abordagem inicial (fluxo
+completo)
+Inbound
+Formulário do site,
+Instagram, outros canais
+diretos
+FORMULARIO_RES
+PONDIDO
+Etapa 6 — Geração da análise (pula
+etapas 1-5)
+Princípio fundamental: um lead = um registro único em leads_automacao. Toda ação da IA reflete
+imediatamente no banco. Nenhuma lógica paralela fora do SMG OS.
+
+
+--- PAGE 3 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 3
+2. Workflow 1 — Scrap SMG (Prospecção)
+O Scrap SMG é o Workflow 1. Ele busca ativamente leads nas fontes de origem, extrai os dados
+necessários, aplica pré-qualificação ICP e insere apenas os leads aprovados em leads_automacao. Não
+interage com leads.
+2.1 Fontes de prospecção
+Fonte
+Dado extraído
+Observação
+Google Maps
+Nome, segmento, telefone,
+endereço, site
+Principal fonte para saúde e beleza
+LinkedIn
+Nome do decisor, cargo,
+empresa, segmento
+Útil para identificação de decisor antecipada
+Instagram
+Nome, segmento, contato
+Relevante para barbearias e estética
+Outras fontes
+Variável conforme canal
+Arquitetura deve permitir adição sem refatoração
+2.2 Gatilho
+ Execução agendada (cron) — periodicidade definida pelo operador
+ Ou disparo manual pelo operador via SMG OS (ImportacaoPage)
+2.3 Pré-qualificação ICP — critérios obrigatórios
+Número de WhatsApp é o critério mais crítico. Lead sem número de WhatsApp válido é inútil para a
+automação — descartar imediatamente, não inserir em leads_automacao.
+Critério
+Regra
+Prioridade
+Ação se falhar
+Número de
+WhatsApp
+Obrigatório. Formato E.164 (+55
+DDD número). Deve existir no
+WhatsApp.
+CRÍTICO
+Descartar
+Empresa ativa
+Não pode ser empresa
+encerrada ou inativa
+Alta
+Descartar
+Presença digital
+Site ativo, perfil com conteúdo
+ou operação visível
+Alta
+Descartar
+Indício de demanda
+Operação existente que se
+beneficiaria do sistema SMG
+Média
+Descartar
+Duplicata
+Telefone ou empresa+segmento
+já existe em leads_automacao
+Alta
+Descartar
+2.4 Normalização dos dados antes do INSERT
+ Telefone: converter para E.164 (+55 DDD número, sem espaços ou caracteres especiais)
+ Segmento: mapear para enum do banco (dentista, nutricionista, fisioterapeuta, dermatologista,
+ortopedista, barbearia, outro)
+ Nome e empresa: limpar caracteres especiais, capitalizar corretamente
+
+
+--- PAGE 4 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 4
+2.5 INSERT em leads_automacao
+Campo
+Valor
+Tipo
+id
+crypto.randomUUID()
+UUID
+nome
+Extraído da fonte
+text
+telefone
+Formato E.164: +55DDD
+número
+text — validado antes do INSERT
+empresa
+Extraído da fonte
+text
+segmento
+Mapeado para enum do
+sistema
+text
+email
+Se disponível, senão vazio
+text
+status
+"NOVO_LEAD"
+text
+canal_aquisicao
+"scrap_smg"
+text
+pipeline_origin
+"automacao"
+text
+automation_active
+true
+boolean
+criado_em
+now()
+timestamp
+Validar formato E.164 antes de qualquer INSERT. A API do WhatsApp rejeita números mal formatados
+e o erro só aparece no momento do envio.
+
+
+--- PAGE 5 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 5
+3. Workflow 2 — Qualificação (fluxo principal)
+Responsável por toda a conversa com o lead via WhatsApp. Opera 100% de forma assíncrona — cada
+mensagem recebida é um evento independente. O WF2 atende outbound e inbound com o mesmo
+workflow, roteando para o ponto de entrada correto com base no status do lead.
+3.1 Lógica de roteamento por tipo de lead
+3.2 Gatilhos do workflow
+Gatilho
+Condição
+Ação
+Webhook WhatsApp
+(entrada)
+Mensagem recebida do lead
+Processar resposta, classificar intenção, decidir
+próximo passo
+Supabase Realtime /
+polling
+Novo lead com status =
+NOVO_LEAD e
+automation_active = true
+Disparar primeira mensagem respeitando horário
+configurado
+Supabase Realtime /
+polling
+Lead com status = FORMUL
+ARIO_RESPONDIDO
+(atualizado pelo frontend)
+Iniciar geração da Análise de Maturidade
+Cron — follow-up
+Lead sem resposta há X
+horas/dias conforme
+sequência
+Verificar janela 24h, enviar follow-up
+
+
+--- PAGE 6 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 6
+4. Etapas do Fluxo Conversacional
+Etapas 1 a 5 — Exclusivas do fluxo outbound
+ 1
+Abordagem Inicial — Outbound
+Lead entra com status NOVO_LEAD. IA envia primeira mensagem apresentando a SMG. Tom consultivo,
+sem pitch. Personalizada por segmento usando template de config_templates (campo etapa + segmento).
+Status: NOVO_LEAD — aguardando resposta
+Banco: leads_automacao_timeline: INSERT tipo "mensagem_enviada". UPDATE ultima_interacao.
+ 2
+Qualificação Inicial — Outbound
+Lead responde. IA classifica intenção: interesse / objeção / dúvida / sem contexto. Com interesse mínimo, IA
+faz perguntas para entender o contexto operacional. Objetivo: confirmar fit básico antes de avançar.
+Status: Mantém NOVO_LEAD. Se sem resposta: inicia sequência FUP.
+Banco: leads_automacao_timeline: INSERT tipo "mensagem_recebida". UPDATE ultima_interacao = now().
+ 3
+Identificação de Decisor — Outbound
+IA pergunta se o lead é o responsável pela decisão. Inserida naturalmente na conversa. Dois caminhos:
+decisor confirmado (continua) ou intermediário (ver Seção 5).
+Status: INTERMEDIARIO_IDENTIFICADO ou continua fluxo normal
+Banco: UPDATE leads_automacao SET status = "INTERMEDIARIO_IDENTIFICADO" quando intermediário
+confirmado.
+ 4
+Preparação para Formulário — Outbound
+IA apresenta o formulário como próximo passo natural. Enquadra como ferramenta para gerar análise
+personalizada gratuita. Deve parecer benefício, não pesquisa. Envia link: smg.com.br/diagnostico.
+Status: Mantém status atual — aguardando preenchimento
+Banco: leads_automacao_timeline: INSERT tipo "link_formulario_enviado".
+ 5
+Formulário Respondido — Outbound
+Lead preenche o formulário no site. O frontend cria registro em leads_diagnostico com token e atualiza
+leads_automacao.status = FORMULARIO_ENVIADO. N8N detecta via Realtime ou polling e avança para
+FORMULARIO_RESPONDIDO.
+Status: FORMULARIO_ENVIADO → FORMULARIO_RESPONDIDO
+Banco: UPDATE status = "FORMULARIO_RESPONDIDO". Ler dados de leads_diagnostico via
+diagnostico_formulario_id.
+Etapas 6 a 8 — Comuns a outbound e inbound
+ 6
+Geração e Entrega da Análise de Maturidade
+N8N lê dados de leads_diagnostico via diagnostico_formulario_id. Monta prompt com os dados e o
+framework SIG. LLM gera a análise completa (avaliação por pilar: Sistema / Inteligência / Gestão, gargalos,
+pré-diagnóstico). N8N gera PDF e envia via WhatsApp como documento. Para inbound: esta é a primeira
+mensagem recebida pelo lead — deve ser direta e de alto valor.
+Status: FORMULARIO_RESPONDIDO → ANALISE_ENVIADA
+Banco: UPDATE status = "ANALISE_ENVIADA". INSERT em analises_maturidade.
+leads_automacao_timeline: INSERT "analise_enviada".
+
+
+--- PAGE 7 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 7
+ 7
+Conversão para Diagnóstico
+IA retoma a conversa após a análise. Para inbound: referenciar dados do formulário na abertura —
+demonstrar personalização, não fazer apresentação genérica. Para outbound: continuar o fio da conversa já
+estabelecida. IA valida fit. Se não houver fit: DESQUALIFICADO com automation_active = false.
+Status: ANALISE_ENVIADA → DECISOR_IDENTIFICADO ou DESQUALIFICADO
+Banco: UPDATE status conforme decisão. Se DESQUALIFICADO: automation_active = false.
+ 8
+Agendamento do Diagnóstico
+IA conduz a conversa até definição de data e hora via mensagem. Captura e registra. Quando confirmado:
+INSERT em leads_crm (idempotente), automation_active = false, notificação ao comercial conforme
+config_notificacoes.
+Status: DECISOR_IDENTIFICADO → DIAGNOSTICO_AGENDADO
+Banco: UPDATE status = "DIAGNOSTICO_AGENDADO", automation_active = false. INSERT leads_crm
+com lead_automacao_id, horario_reuniao, data_prevista. Disparar config_notificacoes.
+Arquitetura assíncrona: o N8N não aguarda resposta em loop. Cada mensagem recebida é um evento
+independente que lê o estado atual do lead do banco e decide o próximo passo.
+
+
+--- PAGE 8 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 8
+5. Fluxo de Bifurcação — Intermediário vs Decisor
+5.1 Caminho: Decisor confirmado
+ IA confirma que o lead é o responsável pela decisão
+ Fluxo continua normalmente pelas etapas 4 a 8 (outbound) ou 6 a 8 (inbound)
+5.2 Caminho: Intermediário identificado
+ UPDATE leads_automacao SET status = "INTERMEDIARIO_IDENTIFICADO", automation_active =
+false no lead original
+ IA solicita o número de WhatsApp do decisor
+ Quando obtido: validar formato E.164, verificar duplicata em leads_automacao
+ INSERT novo lead: telefone do decisor, status = "NOVO_LEAD", mesmo segmento e empresa
+ WF2 reinicia do zero com o novo lead (decisor)
+Aplicar a mesma validação E.164 ao número do decisor recebido via mensagem. Números enviados
+pelo WhatsApp podem vir em formatos variados — normalizar antes do INSERT.
+
+
+--- PAGE 9 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 9
+6. Fluxo Inbound — Detalhamento
+Lead inbound = lead que chegou por iniciativa própria e já preencheu o formulário. Possui intenção
+declarada. Deve ser tratado como lead quente desde o primeiro contato. Entrar no WF2 como
+NOVO_LEAD é erro crítico.
+6.1 Origens de leads inbound
+ Formulário no site (smg.com.br/diagnostico)
+ Instagram — link do formulário compartilhado via DM ou bio
+ Outros canais de entrada direta futuros
+6.2 Como o frontend registra o lead inbound
+DiagnosticoPage.tsx já implementa o fluxo:
+ INSERT em leads_diagnostico com token único gerado pelo banco
+ INSERT em leads_automacao com status = FORMULARIO_ENVIADO, pipeline_origin =
+"diagnostico_site", canal_aquisicao = "inbound_site"
+ Página de sucesso monta link WhatsApp com "SMG-{token}" na mensagem
+O frontend cria o lead como FORMULARIO_ENVIADO (não FORMULARIO_RESPONDIDO). O N8N
+avança para FORMULARIO_RESPONDIDO ao receber a mensagem WhatsApp com o token,
+confirmando que o contato existe e está ativo.
+6.3 Identificação via token
+ Lead envia mensagem WhatsApp começando com "SMG-{token}"
+ N8N extrai o token, busca em leads_diagnostico WHERE token = {token}
+ Vincula ao lead em leads_automacao via diagnostico_formulario_id
+ UPDATE status = "FORMULARIO_RESPONDIDO" — WF2 detecta e inicia Etapa 6
+6.4 Campos que identificam a origem
+Campo
+Outbound
+Inbound
+pipeline_origin
+"automacao"
+"diagnostico_site"
+canal_aquisicao
+"scrap_smg"
+"inbound_site" ou "inbound_indicacao"
+formulario_preenchido
+false
+true
+diagnostico_formulario_id
+null
+UUID do formulário
+status de entrada no WF2
+"NOVO_LEAD"
+"FORMULARIO_RESPONDIDO"
+6.5 Instrução ao agente de IA — comportamento por origem
+O N8N deve incluir pipeline_origin no prompt enviado ao LLM em cada interação:
+
+
+--- PAGE 10 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 10
+Condição
+Comportamento proibido
+Comportamento obrigatório
+pipeline_origin =
+"automacao"
+(outbound)
+Pular apresentação Pular
+qualificação inicial
+Fluxo completo das 8 etapas Aquecer antes de
+enviar formulário
+pipeline_origin =
+"diagnostico_site"
+(inbound)
+Apresentação longa da SMG
+Perguntas já respondidas no
+formulário Reenviar link do
+formulário Tratar como lead frio
+Iniciar direto na entrega da análise Referenciar
+dados já fornecidos Demonstrar que o perfil foi
+estudado Conversa contextualizada
+
+
+--- PAGE 11 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 11
+7. Follow-up e Janela do WhatsApp
+7.1 Regra da janela de 24h
+A API do WhatsApp permite mensagens livres apenas dentro de 24h após a última mensagem do lead.
+Fora da janela: somente Templates aprovados pela Meta.
+O N8N rastreia ultima_interacao em leads_automacao. Toda mensagem recebida: UPDATE
+ultima_interacao = now(). Antes de cada envio: verificar se now() - ultima_interacao < 24h.
+7.2 Sequência de follow-up
+Etapa
+Quando disparar
+Tipo de mensagem
+Objetivo
+FUP 1
+24h após último envio da IA
+(sem resposta)
+Livre se janela aberta
+/ Template se
+fechada
+Reengajamento leve
+FUP 2
+48h após FUP 1 (sem
+resposta)
+Template aprovado
+Novo ângulo de abordagem
+FUP 3
+7 dias após FUP 2 (sem
+resposta)
+Template aprovado
+Tentativa final
+FUP
+Recorrente
+2x por semana após FUP 3
+Template aprovado
+Manter contato até resposta ou
+encerramento
+7.3 Templates aprovados pela Meta
+Templates precisam de aprovação da Meta — pode levar horas a dias. Criar, submeter e aguardar
+aprovação antes dos testes de produção. Sem templates aprovados, follow-ups após 24h são
+impossíveis.
+7.4 Encerramento do follow-up
+ Lead responde — retoma o fluxo normal
+ Lead pede opt-out — automation_active = false, status = DESQUALIFICADO, INSERT timeline
+"opt_out"
+ Lead desqualificado pela IA
+ Operador encerra manualmente via SMG OS
+
+
+--- PAGE 12 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 12
+8. Geração da Análise de Maturidade (PDF)
+Diferencial estratégico do fluxo. Entrega valor ao lead antes do diagnóstico, aumentando
+comparecimento e criando reciprocidade. Disparada para outbound e inbound na Etapa 6.
+8.1 Processo de geração
+Pass
+o
+Ação
+Responsável
+1
+SELECT em leads_diagnostico: segmento, faturamento_mensal,
+num_funcionarios, ferramentas, tentativa_anterior,
+mudanca_operacao, descricao_operacao, urgencia, maior_desafio,
+motivacao, expectativa
+N8N
+2
+Montar prompt com os dados do formulário e o framework SIG como
+base analítica
+N8N
+3
+LLM gera: avaliação de maturidade por pilar, gargalos identificados,
+pré-diagnóstico e próximos passos
+LLM via API
+4
+N8N gera o PDF com o conteúdo. Biblioteca a definir pelo dev
+(sugestão: pdfmake ou Puppeteer). Salvar em Supabase Storage ou
+storage local do VPS.
+N8N
+5
+Enviar PDF via WhatsApp como documento com caption
+personalizado
+N8N → WhatsApp API
+6
+INSERT em analises_maturidade com lead_id, formulario_id e URL
+do arquivo
+N8N → Supabase
+8.2 Estrutura mínima da análise
+ Capa: nome da empresa, segmento, data
+ Resumo executivo: diagnóstico geral de maturidade operacional
+ Pilar Sistema: estrutura de processos e ferramentas atuais
+ Pilar Inteligência: uso de dados e automação
+ Pilar Gestão: visibilidade e controle operacional
+ Top 3 gargalos identificados com base nas respostas
+ Próximos passos: convite para o diagnóstico
+Template visual do PDF e prompts completos são itens em aberto — definidos em documento separado
+(Protocolo de IA). Desenvolver com layout provisório durante os testes.
+
+
+--- PAGE 13 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 13
+9. Regras de Horário e Governança
+Toda configuração de horário vive no banco (config_automacao). O N8N não deve ter lógica de horário
+hardcoded — o operador ajusta pelo SMG OS sem deploy.
+9.1 Campos em config_automacao
+Campo
+Tipo
+Descrição
+horario_inicio
+time
+Hora de início dos envios (ex: 08:00)
+horario_fim
+time
+Hora de encerramento (ex: 20:00)
+dias_personalizados
+text[]
+Array de dias permitidos (ex: ["seg","ter","qua","qui","sex"])
+tempo_resposta_min
+integer
+Intervalo mínimo em minutos entre mensagens para o mesmo lead
+tempo_resposta_max
+integer
+Intervalo máximo em minutos (simula comportamento humano)
+9.2 Lógica de verificação antes de cada envio
+ SELECT * FROM config_automacao LIMIT 1
+ Verificar se o dia atual está em dias_personalizados
+ Verificar se horário atual está entre horario_inicio e horario_fim (fuso: America/Sao_Paulo)
+ Se fora do horário: enfileirar para o próximo horário válido — nunca descartar
+ Aplicar delay aleatório entre tempo_resposta_min e tempo_resposta_max
+Todos os timestamps do banco estão em UTC. Converter para America/Sao_Paulo ao comparar com os
+horários configurados.
+
+
+--- PAGE 14 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 14
+10. Integração com Supabase — Mapa Completo
+O N8N acessa o Supabase via REST API ou Supabase JS Client. Recomendado: Supabase JS Client via
+Code node para operações com joins ou lógica condicional.
+10.1 Operações por tabela
+Tabela
+Operações N8N
+Quando
+leads_automacao
+SELECT (polling/Realtime),
+UPDATE (status,
+automation_active,
+ultima_interacao), INSERT
+A cada ciclo de processamento
+leads_automacao_timeline
+INSERT (mensagem_enviada,
+mensagem_recebida,
+status_atualizado, erro_envio,
+opt_out)
+A cada evento
+config_automacao
+SELECT
+Antes de cada envio
+config_notificacoes
+SELECT
+Ao agendar diagnóstico
+config_templates
+SELECT
+Para montar prompt por segmento e
+etapa
+leads_diagnostico
+SELECT
+Ao detectar
+FORMULARIO_RESPONDIDO
+leads_crm
+INSERT
+Ao confirmar
+DIAGNOSTICO_AGENDADO
+analises_maturidade
+INSERT
+Após gerar e enviar o PDF
+tasks_comerciais
+INSERT
+Ao agendar diagnóstico se canal tasks
+= true
+10.2 Estratégia de detecção de eventos
+Estratégia
+Como funciona
+Quando usar
+Supabase Realtime
+Assina canal Realtime. Evento
+imediato ao INSERT/UPDATE.
+Novo lead, formulário respondido,
+agendamento
+Polling (cron)
+SELECT periódico com condições
+de status e tempo.
+Follow-ups, verificações de horário,
+reprocessamentos
+10.3 Credenciais necessárias no N8N
+Credencial
+Uso
+Onde configurar
+SUPABASE_URL
+Endpoint da API
+N8N Credentials
+SUPABASE_SERVIC
+E_KEY
+Chave de serviço (bypass
+RLS)
+N8N Credentials — NUNCA no frontend
+WHATSAPP_TOKEN
+Bearer token da API Meta
+N8N Credentials
+WHATSAPP_PHON
+E_ID
+Phone Number ID da Meta
+N8N environment variable
+
+
+--- PAGE 15 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 15
+Credencial
+Uso
+Onde configurar
+LLM_API_KEY
+Chave da API do modelo de
+IA
+N8N Credentials
+Usar SUPABASE_SERVICE_KEY no N8N (não a anon key). A service key bypassa RLS e deve ficar
+exclusivamente no servidor N8N — nunca no código frontend ou no repositório.
+
+
+--- PAGE 16 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 16
+11. WhatsApp Business API (Meta) — Guia Técnico
+11.1 Envio de texto livre (dentro da janela 24h)
+POST https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages
+{ "messaging_product": "whatsapp", "to": "+5511999999999",
+"type": "text", "text": { "body": "Mensagem aqui" } }
+11.2 Envio via Template (fora da janela 24h)
+{ "messaging_product": "whatsapp", "to": "+5511999999999",
+"type": "template", "template": { "name": "nome_template",
+"language": { "code": "pt_BR" },
+"components": [{ "type": "body",
+"parameters": [{ "type": "text", "text": "{nome}" }] }] } }
+11.3 Envio de documento PDF (Análise de Maturidade)
+{ "messaging_product": "whatsapp", "to": "+5511999999999",
+"type": "document",
+"document": { "link": "URL_PUBLICA_DO_PDF",
+"caption": "Sua Analise de Maturidade Operacional",
+"filename": "Analise_SMG.pdf" } }
+O PDF precisa de URL pública. Opções: Supabase Storage (bucket público) ou diretório público no VPS
+do N8N.
+11.4 Recebimento de mensagens — Webhook
+ Configurar webhook no Meta Business Manager apontando para URL do N8N
+ Responder 200 OK imediatamente ao receber o evento (requisito da Meta)
+ Extrair: from (telefone), text.body (mensagem), timestamp
+ Buscar lead em leads_automacao WHERE telefone = from
+ UPDATE ultima_interacao = now()
+ Passar para processamento de intenção via LLM
+11.5 Identificação de leads inbound pelo token
+ Verificar se a mensagem começa com "SMG-"
+ Extrair o token
+ SELECT em leads_diagnostico WHERE token = {token}
+ Vincular ao lead em leads_automacao via diagnostico_formulario_id
+ UPDATE status = "FORMULARIO_RESPONDIDO" se ainda não estiver
+
+
+--- PAGE 17 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 17
+12. Tratamento de Erros
+Cenário
+Causa provável
+Ação recomendada
+Falha no envio
+WhatsApp
+Token inválido,
+número bloqueado,
+fora da janela
+Retry com backoff exponencial (3x). Se persistir: INSERT
+timeline "erro_envio". Não atualizar status.
+Número inválido / não
+existe no WhatsApp
+Lead coletado com
+número errado
+automation_active = false. INSERT timeline
+"numero_invalido". Não tentar novamente.
+Formulário não
+preenchido após 7
+dias
+Lead ignorou o link
+FUP de reengajamento. Reenviar link após 3 dias.
+LLM não retorna
+resposta
+Timeout ou erro na
+API
+Retry 2x. Se persistir: INSERT em tasks_comerciais para
+revisão manual.
+Lead responde fora
+do horário
+Mensagem noturna
+Processar intenção, enfileirar resposta para próximo horário
+válido.
+Lead pede opt-out
+Não quer ser
+contatado
+automation_active = false imediatamente. Status =
+DESQUALIFICADO. INSERT timeline "opt_out".
+Supabase
+indisponível
+Instabilidade
+Fila local no N8N. Retry a cada 5 min por até 1h antes de
+alertar.
+Lead sem número
+WhatsApp (WF1)
+Dado ausente na
+fonte
+Descartar. Não inserir. Registrar em log de descarte do
+WF1.
+
+
+--- PAGE 18 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 18
+13. Arquitetura para Escalabilidade
+Centenas de leads simultâneos no curto prazo, milhares no médio prazo. Arquitetura assíncrona
+obrigatória desde o início.
+13.1 Princípios obrigatórios
+ Stateless por execução: cada execução lê o estado do lead do banco. Sem memória de execuções
+anteriores.
+ Processamento independente por lead: um lead nunca bloqueia outro.
+ Idempotência: toda operação é segura para reexecução. Verificar existência antes de inserir.
+ Fila de envio: mensagens enfileiradas com delay entre mensagens do mesmo lead.
+ Rate limiting: controlar taxa respeitando limites da API Meta (~80 msg/seg em contas Tier 1).
+13.2 Configuração N8N recomendada
+Parâmetro
+Valor recomendado
+Motivo
+Executions mode
+queue
+Permite execuções paralelas com worker
+processes
+Concurrency
+10-50 workers
+Ajustar conforme CPU/RAM do VPS
+Execution timeout
+5 min
+Evitar travamento por lead problemático
+Log level
+info
+Rastreabilidade sem overhead excessivo
+Execution data save
+error + manual
+Salvar apenas erros — não sobrecarregar o DB
+interno do N8N
+
+
+--- PAGE 19 ---
+
+SMG OS
+Arquitetura da Automação N8N — Completo
+Confidencial — Uso interno exclusivo
+Página 19
+14. Itens em Aberto
+Os itens abaixo precisam ser definidos antes do go-live, mas não bloqueiam o desenvolvimento da
+arquitetura técnica:
+Item
+Descrição
+Bloqueia go-live?
+Script completo da IA
+Copy de cada mensagem por etapa e
+segmento. Lógica de classificação de
+intenção.
+Sim — usar placeholders durante dev
+Template visual do
+PDF
+Layout e identidade visual da Análise de
+Maturidade
+Não — usar layout provisório
+Prompts da análise
+Prompt completo por segmento para o
+LLM
+Não — usar prompt genérico
+Templates WhatsApp
+Meta
+Mensagens para follow-ups fora da janela
+24h — precisam de aprovação
+Sim — submeter antes do go-live
+Integração com
+agenda
+Cal.com, Calendly ou similar para
+agendamento automático
+Não — agendamento via mensagem
+por ora
+ SMG OS — Arquitetura da Automação N8N (Completo) — Abril 2026
+

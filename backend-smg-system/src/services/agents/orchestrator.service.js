@@ -1,0 +1,1236 @@
+const fs = require("fs");
+const env = require("../../config/env");
+const { resolveWorkflow } = require("../../config/workflows");
+const { getPrisma } = require("../../lib/prisma");
+const {
+  buildRedisKey,
+  pushBufferedMessage,
+  popAllBufferedMessages,
+  acquireLock,
+  releaseLock,
+} = require("../../lib/buffer-store");
+const { generateAiReply } = require("../../lib/ai-client");
+const { buildTypingChunks } = require("../../utils/whatsapp-message");
+const { normalizePhone, textOrEmpty } = require("./helpers");
+const { getAgentOrThrow, getAgentProviderConfig } = require("./registry.service");
+const { sendMetaTextMessage } = require("./providers/meta.provider");
+const { sendUazapiTextMessage } = require("./providers/uazapi.provider");
+const { registerInboundMessageEvent } = require("../wf2/wf2.service");
+const {
+  createExecutionRun,
+  appendExecutionEvent,
+  finishExecutionRun,
+} = require("./execution-tracker.service");
+
+const bufferTimers = new Map();
+const promptCache = new Map();
+
+function logOrchestrator(level, event, payload = {}) {
+  const stamp = new Date().toISOString();
+  const line = `[agents-orchestrator][${stamp}][${event}]`;
+  if (level === "error") {
+    console.error(line, payload);
+    return;
+  }
+  if (level === "warn") {
+    console.warn(line, payload);
+    return;
+  }
+  console.log(line, payload);
+}
+
+function safeJson(value, max = 6000) {
+  try {
+    const raw = JSON.stringify(value);
+    if (!raw) return "";
+    return raw.length > max ? `${raw.slice(0, max)}...<truncated>` : raw;
+  } catch (_error) {
+    return "<unserializable_payload>";
+  }
+}
+
+async function logExecutionEvent(workflow, runId, payload) {
+  if (!runId) return;
+  await appendExecutionEvent({
+    workflow,
+    runId,
+    ...payload,
+  }).catch(() => null);
+}
+
+function getAgentWorkflow(agent) {
+  return resolveWorkflow(agent?.workflow || env.defaultWorkflow || "smg");
+}
+
+function getPrismaForAgent(agent) {
+  return getPrisma(getAgentWorkflow(agent));
+}
+
+function hasConversationModels(prisma) {
+  return Boolean(prisma?.agentConversationMessage && prisma?.agentConversationSession);
+}
+
+function toConversationKey({ provider, from, to }) {
+  const normalizedProvider = textOrEmpty(provider || "meta");
+  const sender = normalizePhone(from);
+  const receiver = normalizePhone(to);
+  return `${normalizedProvider}:${receiver || "default"}:${sender}`;
+}
+
+function getAiConfig(agent) {
+  const raw = agent?.ai && typeof agent.ai === "object" ? agent.ai : {};
+  const bufferSecondsRaw =
+    raw.bufferSeconds !== undefined
+      ? raw.bufferSeconds
+      : env.agentDefaultBufferSeconds;
+  const historyLimitRaw =
+    raw.historyLimit !== undefined
+      ? raw.historyLimit
+      : env.agentConversationHistoryLimit;
+
+  return {
+    enabled: raw.enabled !== false,
+    model: textOrEmpty(env.openaiModel || "gpt-4o-mini"),
+    apiKey: textOrEmpty(raw.apiKey || env.openaiApiKey),
+    useLangChain: raw.useLangChain !== false,
+    humanHandoffEnabled: raw.humanHandoffEnabled !== false,
+    clearMemoryCommandEnabled: raw.clearMemoryCommandEnabled !== false,
+    fallbackReply:
+      textOrEmpty(raw.fallbackReply) ||
+      "Recebi suas mensagens. Obrigado pelo contato, ja vou te ajudar com isso.",
+    bufferSeconds: Math.max(5, Number(bufferSecondsRaw) || 15),
+    historyLimit: Math.max(1, Math.min(Number(historyLimitRaw) || 20, 80)),
+  };
+}
+
+function isAiOrchestratorEnabled(agent) {
+  return getAiConfig(agent).enabled;
+}
+
+function formatConversationHistory(historyItems) {
+  if (!Array.isArray(historyItems) || historyItems.length === 0) {
+    return "Sem historico anterior.";
+  }
+
+  return historyItems
+    .map((item, index) => {
+      const type = item?.role === "ai" ? "ia" : "human";
+      const content = String(item?.content || "").trim();
+      return `${index + 1}. [${type}] ${content}`;
+    })
+    .join("\n");
+}
+
+function buildSystemPrompt({ agent, promptText, tools }) {
+  const toolLines = Array.isArray(tools)
+    ? tools
+        .map((tool) => {
+          const name = textOrEmpty(tool?.name);
+          if (!name) return null;
+          const description = textOrEmpty(tool?.description);
+          return description ? `- ${name}: ${description}` : `- ${name}`;
+        })
+        .filter(Boolean)
+    : [];
+
+  return [
+    "Voce e um assistente de atendimento via WhatsApp.",
+    "Responda de forma clara, curta, util e sem inventar dados.",
+    "Se nao souber algo, seja transparente e peça dados adicionais.",
+    toolLines.length
+      ? `Tools disponiveis:\n${toolLines.join("\n")}\nUse as tools quando necessario.`
+      : "Nenhuma tool externa configurada no momento.",
+    `Agente: ${textOrEmpty(agent?.name || agent?.slug || "agente")}.`,
+    textOrEmpty(agent?.description)
+      ? `Descricao do agente: ${textOrEmpty(agent.description)}.`
+      : null,
+    promptText ? `Prompt base do agente:\n${promptText}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildUserPrompt({ senderName, senderNumber, historyItems, messages }) {
+  const mergedMessages = messages
+    .map((item, index) => `Mensagem ${index + 1}: ${String(item?.text || "").trim()}`)
+    .filter(Boolean)
+    .join("\n");
+
+  return [
+    `Contato: ${senderName || "Cliente"} (${senderNumber}).`,
+    "Historico recente da conversa:",
+    formatConversationHistory(historyItems),
+    "Mensagens recebidas em buffer:",
+    mergedMessages,
+    "Responda como atendente comercial e continue a conversa de forma natural.",
+  ].join("\n\n");
+}
+
+function sanitizeTool(toolConfig) {
+  if (!toolConfig || typeof toolConfig !== "object") return null;
+  if (toolConfig.enabled === false) return null;
+  if (typeof toolConfig.handler !== "function") return null;
+
+  const name = textOrEmpty(toolConfig.name);
+  if (!name) return null;
+
+  const description = textOrEmpty(toolConfig.description || "Tool externa");
+  const schema = toolConfig.schema && typeof toolConfig.schema === "object" ? toolConfig.schema : {};
+
+  return {
+    name,
+    description,
+    schema,
+    handler: toolConfig.handler,
+  };
+}
+
+async function resolveAgentTools({ agent, context }) {
+  let tools = [];
+  if (typeof agent.buildTools === "function") {
+    const loaded = await agent.buildTools(context);
+    tools = Array.isArray(loaded) ? loaded : [];
+  } else if (Array.isArray(agent.tools)) {
+    tools = agent.tools;
+  }
+
+  return tools.map((tool) => sanitizeTool(tool)).filter(Boolean);
+}
+
+function loadAgentPromptText(agent) {
+  const promptFile = textOrEmpty(agent?.promptFile);
+  if (!promptFile) return "";
+
+  if (promptCache.has(promptFile)) {
+    return promptCache.get(promptFile);
+  }
+
+  try {
+    const content = fs.readFileSync(promptFile, "utf8");
+    const normalized = String(content || "").trim();
+    promptCache.set(promptFile, normalized);
+    return normalized;
+  } catch (error) {
+    logOrchestrator("warn", "agent.prompt.read_failed", {
+      agentSlug: agent?.slug,
+      promptFile,
+      message: error?.message || "unknown",
+    });
+    promptCache.set(promptFile, "");
+    return "";
+  }
+}
+
+async function loadConversationHistory({
+  prisma,
+  workflow,
+  agentSlug,
+  conversationKey,
+  limit = 20,
+}) {
+  if (!hasConversationModels(prisma)) return [];
+
+  const rows = await prisma.agentConversationMessage.findMany({
+    where: {
+      workflow,
+      agentSlug,
+      conversationKey,
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.max(1, Math.min(Number(limit) || 20, 80)),
+    select: {
+      role: true,
+      content: true,
+      createdAt: true,
+    },
+  });
+
+  return rows.reverse();
+}
+
+async function saveConversationMessages({
+  prisma,
+  workflow,
+  agentSlug,
+  provider,
+  conversationKey,
+  phoneNumber,
+  role,
+  messages,
+}) {
+  if (!hasConversationModels(prisma)) return;
+
+  const normalizedRole = role === "ai" ? "ai" : "human";
+  const payloads = (Array.isArray(messages) ? messages : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .map((content) => ({
+      workflow,
+      agentSlug,
+      provider,
+      conversationKey,
+      phoneNumber,
+      role: normalizedRole,
+      content,
+    }));
+
+  if (!payloads.length) return;
+
+  await prisma.agentConversationMessage.createMany({
+    data: payloads,
+  });
+}
+
+async function getConversationSession({ prisma, workflow, agentSlug, conversationKey }) {
+  if (!hasConversationModels(prisma)) return null;
+
+  return prisma.agentConversationSession.findUnique({
+    where: {
+      workflow_agentSlug_conversationKey: {
+        workflow,
+        agentSlug,
+        conversationKey,
+      },
+    },
+  });
+}
+
+async function upsertConversationSessionHeartbeat({
+  prisma,
+  workflow,
+  agentSlug,
+  provider,
+  conversationKey,
+  phoneNumber,
+}) {
+  if (!hasConversationModels(prisma)) return null;
+
+  return prisma.agentConversationSession.upsert({
+    where: {
+      workflow_agentSlug_conversationKey: {
+        workflow,
+        agentSlug,
+        conversationKey,
+      },
+    },
+    update: {
+      provider,
+      phoneNumber,
+      lastMessageAt: new Date(),
+    },
+    create: {
+      workflow,
+      agentSlug,
+      provider,
+      conversationKey,
+      phoneNumber,
+      lastMessageAt: new Date(),
+    },
+  });
+}
+
+async function pauseConversationSessionForHuman({
+  prisma,
+  workflow,
+  agentSlug,
+  provider,
+  conversationKey,
+  phoneNumber,
+  reason,
+}) {
+  if (!hasConversationModels(prisma)) return null;
+
+  return prisma.agentConversationSession.upsert({
+    where: {
+      workflow_agentSlug_conversationKey: {
+        workflow,
+        agentSlug,
+        conversationKey,
+      },
+    },
+    update: {
+      provider,
+      phoneNumber,
+      aiPaused: true,
+      pausedReason: String(reason || "Transferencia para humano"),
+      pausedAt: new Date(),
+      lastMessageAt: new Date(),
+    },
+    create: {
+      workflow,
+      agentSlug,
+      provider,
+      conversationKey,
+      phoneNumber,
+      aiPaused: true,
+      pausedReason: String(reason || "Transferencia para humano"),
+      pausedAt: new Date(),
+      lastMessageAt: new Date(),
+    },
+  });
+}
+
+async function clearConversationMemory({
+  prisma,
+  workflow,
+  agentSlug,
+  conversationKey,
+}) {
+  if (!hasConversationModels(prisma)) {
+    return { messagesDeleted: 0, sessionsReset: 0 };
+  }
+
+  const deleted = await prisma.agentConversationMessage.deleteMany({
+    where: {
+      workflow,
+      agentSlug,
+      conversationKey,
+    },
+  });
+
+  const reset = await prisma.agentConversationSession.updateMany({
+    where: {
+      workflow,
+      agentSlug,
+      conversationKey,
+    },
+    data: {
+      aiPaused: false,
+      pausedReason: null,
+      pausedAt: null,
+      lastMessageAt: new Date(),
+    },
+  });
+
+  return {
+    messagesDeleted: Number(deleted?.count || 0),
+    sessionsReset: Number(reset?.count || 0),
+  };
+}
+
+async function sendTextByProvider({ agent, provider, to, text }) {
+  if (!env.allowOutboundMessages) {
+    logOrchestrator("warn", "outbound.send.skipped", {
+      explanation:
+        "Envio outbound suprimido por configuracao global de somente recebimento.",
+      agentSlug: agent?.slug || null,
+      provider,
+      to,
+      textPreview: textOrEmpty(text).slice(0, 500),
+    });
+    return {
+      suppressed: true,
+      reason: "outbound_disabled",
+      provider,
+      to,
+    };
+  }
+
+  const { config: providerConfig } = getAgentProviderConfig(agent, provider);
+  if (provider === "meta") {
+    return sendMetaTextMessage(providerConfig, { to, text });
+  }
+  return sendUazapiTextMessage(providerConfig, { to, text });
+}
+
+async function sendBufferedReply({ agent, provider, to, text }) {
+  if (!env.allowOutboundMessages) {
+    return {
+      sentCount: 0,
+      sent: [],
+      chunks: [],
+      suppressed: true,
+      reason: "outbound_disabled",
+    };
+  }
+
+  const chunks = buildTypingChunks(text, {
+    maxChunkLength: Math.max(120, Number(env.agentReplyChunkMaxLength) || 420),
+  });
+  const sent = [];
+  const outgoing = chunks.length ? chunks : [{ text: String(text || "").trim() }];
+
+  for (const chunk of outgoing) {
+    const result = await sendTextByProvider({
+      agent,
+      provider,
+      to,
+      text: String(chunk?.text || "").trim(),
+    });
+    sent.push(result);
+  }
+
+  return {
+    sentCount: sent.length,
+    sent,
+    chunks: outgoing.map((chunk) => String(chunk?.text || "").trim()).filter(Boolean),
+  };
+}
+
+function scheduleBufferedProcessing(jobPayload) {
+  const existing = bufferTimers.get(jobPayload.timerKey);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const handler = setTimeout(() => {
+    bufferTimers.delete(jobPayload.timerKey);
+    processBufferedConversation(jobPayload).catch((error) => {
+      logOrchestrator("error", "buffer.process.unhandled_error", {
+        timerKey: jobPayload.timerKey,
+        message: error?.message || "unknown",
+      });
+    });
+  }, jobPayload.waitMs);
+
+  if (typeof handler.unref === "function") {
+    handler.unref();
+  }
+
+  bufferTimers.set(jobPayload.timerKey, handler);
+}
+
+async function processBufferedConversation(jobPayload) {
+  const lockAcquired = await acquireLock(jobPayload.lockKey, 45000);
+  if (!lockAcquired) {
+    logOrchestrator("warn", "buffer.process.lock_not_acquired", {
+      timerKey: jobPayload.timerKey,
+      lockKey: jobPayload.lockKey,
+    });
+    return;
+  }
+
+  let executionRun = null;
+  let workflow = resolveWorkflow("smg");
+
+  try {
+    const messages = await popAllBufferedMessages(jobPayload.bufferKey);
+    if (!messages.length) {
+      return;
+    }
+
+    const agent = getAgentOrThrow(jobPayload.agentSlug);
+    workflow = getAgentWorkflow(agent);
+    const prisma = getPrismaForAgent(agent);
+    const aiConfig = getAiConfig(agent);
+    const lastMessage = messages[messages.length - 1];
+    const senderNumber = normalizePhone(lastMessage?.senderNumber);
+
+    executionRun = await createExecutionRun({
+      workflow,
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      phoneNumber: senderNumber || "",
+      triggerSource: "buffer:flush",
+      inputPayload: {
+        messagesCount: messages.length,
+        timerKey: jobPayload.timerKey,
+        conversationKey: jobPayload.conversationKey,
+      },
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "buffer_flush_start",
+      title: "Processamento do buffer iniciado",
+      nodeType: "trigger",
+      status: "success",
+      payload: {
+        messagesCount: messages.length,
+      },
+    });
+
+    logOrchestrator("info", "buffer.process.received_messages", {
+      explanation:
+        "Mensagens removidas do buffer para processamento consolidado da IA.",
+      agentSlug: jobPayload.agentSlug,
+      conversationKey: jobPayload.conversationKey,
+      provider: jobPayload.provider,
+      messagesCount: messages.length,
+      messagesPreview: messages.map((item) => ({
+        senderNumber: item?.senderNumber || null,
+        senderName: item?.senderName || null,
+        providerMessageId: item?.providerMessageId || null,
+        text: textOrEmpty(item?.text).slice(0, 300),
+      })),
+    });
+
+    if (!senderNumber) {
+      logOrchestrator("warn", "buffer.process.sender_not_identified", {
+        agentSlug: agent.slug,
+        timerKey: jobPayload.timerKey,
+      });
+      await logExecutionEvent(workflow, executionRun?.id, {
+        stepKey: "buffer_sender_missing",
+        title: "Remetente nao identificado",
+        nodeType: "condition",
+        status: "warning",
+        payload: {},
+      });
+      if (executionRun?.id) {
+        await finishExecutionRun({
+          workflow,
+          runId: executionRun.id,
+          status: "warning",
+          outputPayload: {
+            reason: "sender_not_identified",
+          },
+        }).catch(() => null);
+      }
+      return;
+    }
+
+    await upsertConversationSessionHeartbeat({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      phoneNumber: senderNumber,
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "session_heartbeat",
+      title: "Sessao atualizada",
+      nodeType: "process",
+      status: "success",
+      payload: {
+        conversationKey: jobPayload.conversationKey,
+      },
+    });
+
+    const historyItems = await loadConversationHistory({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      conversationKey: jobPayload.conversationKey,
+      limit: aiConfig.historyLimit,
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "history_loaded",
+      title: "Historico de conversa carregado",
+      nodeType: "database",
+      status: "success",
+      payload: {
+        historyItems: historyItems.length,
+      },
+    });
+
+    const promptText = loadAgentPromptText(agent);
+    let pausedSessionFromTool = null;
+    const tools = await resolveAgentTools({
+      agent,
+      context: {
+        agent,
+        workflow,
+        provider: jobPayload.provider,
+        conversationKey: jobPayload.conversationKey,
+        senderNumber,
+        historyItems,
+        messages,
+        prisma,
+        log: logOrchestrator,
+      },
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "tools_resolved",
+      title: "Tools resolvidas para a execucao",
+      nodeType: "process",
+      status: "info",
+      payload: {
+        toolsCount: tools.length,
+      },
+    });
+
+    const systemPrompt = buildSystemPrompt({
+      agent,
+      promptText,
+      tools,
+    });
+    const userPrompt = buildUserPrompt({
+      senderName: String(lastMessage?.senderName || "").trim(),
+      senderNumber,
+      historyItems,
+      messages,
+    });
+
+    logOrchestrator("info", "buffer.process.ai_prompt", {
+      explanation:
+        "Prompt enviado para a IA apos consolidar buffer e historico da conversa.",
+      agentSlug: agent.slug,
+      conversationKey: jobPayload.conversationKey,
+      systemPromptPreview: textOrEmpty(systemPrompt).slice(0, 1200),
+      userPromptPreview: textOrEmpty(userPrompt).slice(0, 1200),
+      tools: tools.map((tool) => tool.name),
+    });
+
+    await saveConversationMessages({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      phoneNumber: senderNumber,
+      role: "human",
+      messages: messages.map((item) => item.text),
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "inbound_saved",
+      title: "Mensagens inbound salvas",
+      nodeType: "database",
+      status: "success",
+      payload: {
+        count: messages.length,
+      },
+    });
+
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "ai_request",
+      title: "Solicitacao enviada para IA",
+      nodeType: "ai",
+      status: "info",
+      payload: {
+        model: aiConfig.model,
+        useLangChain: aiConfig.useLangChain,
+      },
+    });
+
+    const aiResult = await generateAiReply({
+      systemPrompt,
+      userPrompt,
+      fallbackReply: aiConfig.fallbackReply,
+      useLangChain: aiConfig.useLangChain,
+      model: aiConfig.model,
+      apiKey: aiConfig.apiKey,
+      allowEnvFallback: true,
+      toolsConfig: {
+        humanHandoffEnabled: aiConfig.humanHandoffEnabled,
+      },
+      externalTools: tools,
+      onHumanHandoff: async ({ reason }) => {
+        pausedSessionFromTool = await pauseConversationSessionForHuman({
+          prisma,
+          workflow,
+          agentSlug: agent.slug,
+          provider: jobPayload.provider,
+          conversationKey: jobPayload.conversationKey,
+          phoneNumber: senderNumber,
+          reason,
+        });
+      },
+    });
+
+    logOrchestrator("info", "buffer.process.ai_response", {
+      explanation: "Resposta retornada pela IA para envio ao lead.",
+      agentSlug: agent.slug,
+      conversationKey: jobPayload.conversationKey,
+      model: aiResult?.model || null,
+      usedFallback: Boolean(aiResult?.usedFallback),
+      usedLangChain: Boolean(aiResult?.usedLangChain),
+      handoffTriggered: Boolean(aiResult?.handoffTriggered),
+      usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+      responseText: textOrEmpty(aiResult?.text).slice(0, 1200),
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "ai_response",
+      title: "Resposta gerada pela IA",
+      nodeType: "ai",
+      status: aiResult?.usedFallback ? "warning" : "success",
+      payload: {
+        model: aiResult?.model || null,
+        usedFallback: Boolean(aiResult?.usedFallback),
+        usedLangChain: Boolean(aiResult?.usedLangChain),
+        handoffTriggered: Boolean(aiResult?.handoffTriggered),
+        usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+      },
+    });
+
+    const replyText = textOrEmpty(aiResult?.text || aiConfig.fallbackReply);
+    const sentReply = await sendBufferedReply({
+      agent,
+      provider: jobPayload.provider,
+      to: senderNumber,
+      text: replyText,
+    });
+
+    logOrchestrator("info", "buffer.process.provider_response", {
+      explanation:
+        "Resultado do envio da resposta da IA para o provider de WhatsApp.",
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      sentCount: sentReply.sentCount,
+      chunks: sentReply.chunks,
+      providerRawResponse: safeJson(sentReply.sent),
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "provider_send",
+      title: "Mensagens enviadas ao provider",
+      nodeType: "process",
+      status: "success",
+      payload: {
+        sentCount: sentReply.sentCount,
+      },
+    });
+
+    const outboundMessages = sentReply.suppressed
+      ? []
+      : sentReply.chunks.length
+      ? sentReply.chunks
+      : [replyText];
+
+    if (outboundMessages.length) {
+      await saveConversationMessages({
+        prisma,
+        workflow,
+        agentSlug: agent.slug,
+        provider: jobPayload.provider,
+        conversationKey: jobPayload.conversationKey,
+        phoneNumber: senderNumber,
+        role: "ai",
+        messages: outboundMessages,
+      });
+      await logExecutionEvent(workflow, executionRun?.id, {
+        stepKey: "outbound_saved",
+        title: "Mensagens outbound salvas",
+        nodeType: "database",
+        status: "success",
+        payload: {
+          count: outboundMessages.length,
+        },
+      });
+    } else if (sentReply.suppressed) {
+      await logExecutionEvent(workflow, executionRun?.id, {
+        stepKey: "outbound_suppressed",
+        title: "Envio outbound suprimido por configuracao",
+        nodeType: "condition",
+        status: "warning",
+        payload: {
+          reason: sentReply.reason || "outbound_disabled",
+        },
+      });
+    }
+
+    await upsertConversationSessionHeartbeat({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      phoneNumber: senderNumber,
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "session_heartbeat_final",
+      title: "Sessao final atualizada",
+      nodeType: "process",
+      status: "success",
+      payload: {},
+    });
+
+    logOrchestrator("info", "buffer.process.success", {
+      workflow,
+      agentSlug: agent.slug,
+      provider: jobPayload.provider,
+      conversationKey: jobPayload.conversationKey,
+      inboundMessages: messages.length,
+      outboundMessages: outboundMessages.length,
+      model: aiResult?.model || null,
+      usedFallback: Boolean(aiResult?.usedFallback),
+      usedLangChain: Boolean(aiResult?.usedLangChain),
+      handoffTriggered: Boolean(aiResult?.handoffTriggered),
+      handoffReason: aiResult?.handoffReason || null,
+      pausedSessionId: pausedSessionFromTool?.id || null,
+      usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+    });
+    if (executionRun?.id) {
+      await finishExecutionRun({
+        workflow,
+        runId: executionRun.id,
+        status: "success",
+        outputPayload: {
+          inboundMessages: messages.length,
+          outboundMessages: outboundMessages.length,
+          model: aiResult?.model || null,
+          usedFallback: Boolean(aiResult?.usedFallback),
+          handoffTriggered: Boolean(aiResult?.handoffTriggered),
+        },
+      }).catch(() => null);
+    }
+  } catch (error) {
+    logOrchestrator("error", "buffer.process.error", {
+      agentSlug: jobPayload.agentSlug,
+      provider: jobPayload.provider,
+      timerKey: jobPayload.timerKey,
+      message: error?.message || "unknown",
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "buffer_error",
+      title: "Falha no processamento do buffer",
+      nodeType: "process",
+      status: "error",
+      payload: {
+        message: error?.message || "unknown",
+      },
+    });
+    if (executionRun?.id) {
+      await finishExecutionRun({
+        workflow,
+        runId: executionRun.id,
+        status: "error",
+        errorMessage: error?.message || "unknown",
+        outputPayload: {
+          reason: "buffer_process_error",
+        },
+      }).catch(() => null);
+    }
+  } finally {
+    await releaseLock(jobPayload.lockKey).catch(() => null);
+  }
+}
+
+async function clearConversationAndPendingBuffer({
+  agent,
+  provider,
+  conversationKey,
+  timerKey,
+  bufferKey,
+  destination,
+}) {
+  const prisma = getPrismaForAgent(agent);
+  const workflow = getAgentWorkflow(agent);
+
+  const existingTimer = bufferTimers.get(timerKey);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    bufferTimers.delete(timerKey);
+  }
+
+  await popAllBufferedMessages(bufferKey).catch(() => []);
+  const clearResult = await clearConversationMemory({
+    prisma,
+    workflow,
+    agentSlug: agent.slug,
+    conversationKey,
+  });
+
+  await sendTextByProvider({
+    agent,
+    provider,
+    to: destination,
+    text: "Memoria da conversa limpa com sucesso. Podemos comecar novamente.",
+  });
+
+  return clearResult;
+}
+
+async function queueInboundForOrchestrator({
+  agent,
+  inboundProvider,
+  event,
+  execution = null,
+}) {
+  const aiConfig = getAiConfig(agent);
+  const senderNumber = normalizePhone(event?.from);
+  const destinationNumber = normalizePhone(event?.to);
+  const text = textOrEmpty(event?.text);
+  const workflow = getAgentWorkflow(agent);
+  const runId = execution?.runId || null;
+
+  logOrchestrator("info", "queue.inbound.received", {
+    explanation:
+      "Mensagem inbound recebida pelo orquestrador antes de regras de WF2/buffer.",
+    agentSlug: agent.slug,
+    inboundProvider,
+    senderNumber,
+    destinationNumber,
+    text: text.slice(0, 1000),
+    messageId: textOrEmpty(event?.messageId),
+  });
+
+  if (!text) {
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "ignored_empty_text",
+      title: "Mensagem ignorada por texto vazio",
+      nodeType: "condition",
+      status: "warning",
+      payload: {},
+    });
+    return {
+      handled: false,
+      ignored: true,
+      reason: "empty_text",
+      buffered: false,
+    };
+  }
+
+  const conversationKey = toConversationKey({
+    provider: inboundProvider,
+    from: senderNumber,
+    to: destinationNumber,
+  });
+  const timerKey = `${workflow}:${agent.slug}:${conversationKey}`;
+  const bufferKey = buildRedisKey(`agent-buffer:${timerKey}`);
+  const lockKey = buildRedisKey(`agent-lock:${timerKey}`);
+  const prisma = getPrismaForAgent(agent);
+
+  await logExecutionEvent(workflow, runId, {
+    stepKey: "conversation_key_resolved",
+    title: "Chave de conversa resolvida",
+    nodeType: "process",
+    status: "info",
+    payload: {
+      conversationKey,
+      senderNumber,
+      destinationNumber,
+    },
+  });
+
+  if (agent?.wf2?.enabled) {
+    const wf2Result = await registerInboundMessageEvent({
+      agentSlug: agent.slug,
+      workflow,
+      provider: inboundProvider,
+      phoneNumber: senderNumber,
+      messageText: text,
+      profileName: textOrEmpty(event?.profileName),
+    });
+
+    logOrchestrator("info", "queue.inbound.wf2_result", {
+      explanation:
+        "Resultado do registro do inbound no WF2 (estado do lead, opt-out, token, etc).",
+      agentSlug: agent.slug,
+      conversationKey,
+      wf2Result: safeJson({
+        foundLead: Boolean(wf2Result?.foundLead),
+        suppressAi: Boolean(wf2Result?.suppressAi),
+        reason: wf2Result?.reason || null,
+        immediateReply: textOrEmpty(wf2Result?.immediateReply).slice(0, 300),
+      }),
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "wf2_inbound_registered",
+      title: "Evento inbound registrado no WF2",
+      nodeType: "process",
+      status: wf2Result?.foundLead ? "success" : "warning",
+      payload: {
+        reason: wf2Result?.reason || null,
+        suppressAi: Boolean(wf2Result?.suppressAi),
+      },
+    });
+
+    if (wf2Result?.suppressAi) {
+      if (textOrEmpty(wf2Result.immediateReply)) {
+        await sendTextByProvider({
+          agent,
+          provider: inboundProvider,
+          to: senderNumber,
+          text: wf2Result.immediateReply,
+        });
+      }
+
+      await logExecutionEvent(workflow, runId, {
+        stepKey: "wf2_suppressed_ai",
+        title: "Resposta tratada pelo WF2 sem IA",
+        nodeType: "process",
+        status: "success",
+        payload: {
+          reason: wf2Result.reason || "wf2_suppressed_ai",
+          immediateReply: Boolean(textOrEmpty(wf2Result.immediateReply)),
+        },
+      });
+
+      return {
+        handled: true,
+        ignored: false,
+        reason: wf2Result.reason || "wf2_suppressed_ai",
+        buffered: false,
+        waitSeconds: null,
+        pausedForHuman: false,
+        conversationKey,
+      };
+    }
+  }
+
+  const normalizedText = text.toLowerCase();
+  if (aiConfig.clearMemoryCommandEnabled && normalizedText === "/clear") {
+    const clearResult = await clearConversationAndPendingBuffer({
+      agent,
+      provider: inboundProvider,
+      conversationKey,
+      timerKey,
+      bufferKey,
+      destination: senderNumber,
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "memory_cleared",
+      title: "Memoria de conversa limpa",
+      nodeType: "process",
+      status: "success",
+      payload: {
+        messagesDeleted: Number(clearResult?.messagesDeleted || 0),
+        sessionsReset: Number(clearResult?.sessionsReset || 0),
+      },
+    });
+
+    return {
+      handled: true,
+      ignored: false,
+      reason: "memory_cleared",
+      buffered: false,
+      cleared: true,
+      clearResult,
+      conversationKey,
+    };
+  }
+
+  const session = await getConversationSession({
+    prisma,
+    workflow,
+    agentSlug: agent.slug,
+    conversationKey,
+  });
+  if (session?.aiPaused) {
+    await saveConversationMessages({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: inboundProvider,
+      conversationKey,
+      phoneNumber: senderNumber,
+      role: "human",
+      messages: [text],
+    });
+
+    await upsertConversationSessionHeartbeat({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: inboundProvider,
+      conversationKey,
+      phoneNumber: senderNumber,
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "paused_for_human",
+      title: "Conversa pausada para humano",
+      nodeType: "condition",
+      status: "warning",
+      payload: {
+        pausedReason: session?.pausedReason || null,
+      },
+    });
+
+    return {
+      handled: true,
+      ignored: false,
+      reason: "paused_for_human",
+      buffered: false,
+      pausedForHuman: true,
+      conversationKey,
+    };
+  }
+
+  if (!env.allowOutboundMessages) {
+    await saveConversationMessages({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: inboundProvider,
+      conversationKey,
+      phoneNumber: senderNumber,
+      role: "human",
+      messages: [text],
+    });
+
+    await upsertConversationSessionHeartbeat({
+      prisma,
+      workflow,
+      agentSlug: agent.slug,
+      provider: inboundProvider,
+      conversationKey,
+      phoneNumber: senderNumber,
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "outbound_disabled_inbound_only",
+      title: "Modo somente recebimento ativo",
+      nodeType: "condition",
+      status: "warning",
+      payload: {
+        reason: "outbound_disabled",
+      },
+    });
+
+    return {
+      handled: true,
+      ignored: false,
+      reason: "outbound_disabled",
+      buffered: false,
+      waitSeconds: null,
+      pausedForHuman: false,
+      conversationKey,
+    };
+  }
+
+  const bufferedMessage = {
+    text,
+    senderNumber,
+    senderName: textOrEmpty(event?.profileName),
+    providerMessageId: textOrEmpty(event?.messageId),
+    receivedAt: Date.now(),
+  };
+
+  await pushBufferedMessage(bufferKey, bufferedMessage, aiConfig.bufferSeconds + 120);
+
+  logOrchestrator("info", "queue.inbound.buffer_push", {
+    explanation:
+      "Mensagem adicionada ao buffer para juntar entradas proximas antes da chamada da IA.",
+    agentSlug: agent.slug,
+    conversationKey,
+    bufferKey,
+    ttlSeconds: aiConfig.bufferSeconds + 120,
+    waitSeconds: aiConfig.bufferSeconds,
+    bufferedMessage: safeJson({
+      senderNumber: bufferedMessage.senderNumber,
+      senderName: bufferedMessage.senderName,
+      providerMessageId: bufferedMessage.providerMessageId,
+      text: textOrEmpty(bufferedMessage.text).slice(0, 300),
+      receivedAt: bufferedMessage.receivedAt,
+    }),
+  });
+
+  await logExecutionEvent(workflow, runId, {
+    stepKey: "buffer_queued",
+    title: "Mensagem enfileirada no buffer",
+    nodeType: "queue",
+    status: "success",
+    payload: {
+      waitSeconds: aiConfig.bufferSeconds,
+      bufferKey,
+    },
+  });
+
+  scheduleBufferedProcessing({
+    timerKey,
+    lockKey,
+    bufferKey,
+    waitMs: aiConfig.bufferSeconds * 1000,
+    agentSlug: agent.slug,
+    provider: inboundProvider,
+    conversationKey,
+  });
+
+  return {
+    handled: true,
+    ignored: false,
+    reason: "buffered",
+    buffered: true,
+    waitSeconds: aiConfig.bufferSeconds,
+    conversationKey,
+  };
+}
+
+module.exports = {
+  isAiOrchestratorEnabled,
+  queueInboundForOrchestrator,
+};

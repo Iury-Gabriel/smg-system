@@ -1,0 +1,447 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum LeadSegment {
+  dentista
+  nutricionista
+  fisioterapeuta
+  dermatologista
+  ortopedista
+  barbearia
+  estetica
+  corretor
+  restaurante
+  automovel
+  construtora
+  engenharia
+  arquitetura
+  outro
+}
+
+enum ScrapeSource {
+  google_search
+  google_maps
+  website_scraper
+  linkedin
+  instagram
+  manual
+}
+
+enum DiscardReason {
+  sem_telefone
+  telefone_formato_invalido
+  numero_invalido_whatsapp
+  empresa_inativa
+  sem_presenca_digital
+  sem_indicador_demanda
+  fora_do_icp
+  duplicata_telefone
+  duplicata_email
+  duplicata_empresa_segmento
+  sem_nome
+  sem_email
+  sem_endereco
+  segmento_invalido
+  erro_extracao
+  erro_interno
+}
+
+enum JobExecutionStatus {
+  running
+  success
+  failed
+}
+
+enum AgentConversationRole {
+  human
+  ai
+}
+
+model LeadAutomacao {
+  id               String       @id
+  nome             String
+  telefone         String?      @unique
+  empresa          String
+  segmento         LeadSegment
+  endereco         String
+  site             String?
+  email            String?
+  agentSlug        String       @default("default-sdr")
+  status           String       @default("NOVO_LEAD")
+  canalAquisicao   String       @default("scrap_smg")
+  pipelineOrigin   String       @default("automacao")
+  automationActive Boolean      @default(true)
+  formularioPreenchido Boolean  @default(false)
+  diagnosticoFormularioId String?
+  ultimaInteracao DateTime?
+  ultimoEnvioIa DateTime?
+  proximoFollowupEm DateTime?
+  followupNivel Int             @default(0)
+  criadoEm         DateTime     @default(now())
+  fonteOrigem      ScrapeSource
+  dadosBrutos      Json?
+
+  @@unique([empresa, segmento])
+  @@index([segmento, criadoEm])
+  @@index([status, criadoEm])
+  @@index([automationActive, status])
+  @@index([agentSlug, status, criadoEm])
+  @@index([diagnosticoFormularioId])
+  @@index([proximoFollowupEm])
+}
+
+model DiscardLog {
+  id               String        @id @default(cuid())
+  timestamp        DateTime      @default(now())
+  fonte            ScrapeSource
+  motivoDescarte   DiscardReason
+  telefoneTentativo String?
+  segmentoTentativo String?
+  dadosBrutos      Json?
+  mensagem         String?
+
+  @@index([motivoDescarte, timestamp])
+  @@index([fonte, timestamp])
+}
+
+model SegmentConfig {
+  id          String       @id @default(cuid())
+  segment     LeadSegment  @unique
+  displayName String
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  presets     SearchPreset[]
+}
+
+model SearchPreset {
+  id           String       @id @default(cuid())
+  name         String
+  source       ScrapeSource
+  query        String
+  startOffset  Int          @default(0)
+  location     String?
+  ll           String?
+  googleDomain String       @default("google.com")
+  hl           String       @default("pt")
+  gl           String       @default("br")
+  maxResults   Int          @default(20)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  segmentId    String
+  segment      SegmentConfig @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, source])
+  @@index([segmentId, isActive])
+}
+
+model JobExecution {
+  id             String             @id @default(cuid())
+  queueJobId     String?
+  startedAt      DateTime           @default(now())
+  finishedAt     DateTime?
+  status         JobExecutionStatus @default(running)
+  totalCollected Int                @default(0)
+  totalApproved  Int                @default(0)
+  totalDiscarded Int                @default(0)
+  errorMessage   String?
+  details        Json?
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+}
+
+model LeadAutomacaoBsb {
+  id               String       @id
+  nome             String
+  telefone         String?      @unique
+  empresa          String
+  segmento         LeadSegment
+  endereco         String
+  site             String?
+  email            String?
+  agentSlug        String       @default("default-sdr")
+  status           String       @default("NOVO_LEAD")
+  canalAquisicao   String       @default("scrap_bsb")
+  pipelineOrigin   String       @default("automacao")
+  automationActive Boolean      @default(true)
+  formularioPreenchido Boolean  @default(false)
+  diagnosticoFormularioId String?
+  ultimaInteracao DateTime?
+  ultimoEnvioIa DateTime?
+  proximoFollowupEm DateTime?
+  followupNivel Int             @default(0)
+  criadoEm         DateTime     @default(now())
+  fonteOrigem      ScrapeSource
+  dadosBrutos      Json?
+
+  @@unique([empresa, segmento])
+  @@index([segmento, criadoEm])
+  @@index([status, criadoEm])
+  @@index([automationActive, status])
+  @@index([agentSlug, status, criadoEm])
+  @@index([diagnosticoFormularioId])
+  @@index([proximoFollowupEm])
+}
+
+model DiscardLogBsb {
+  id                String        @id @default(cuid())
+  timestamp         DateTime      @default(now())
+  fonte             ScrapeSource
+  motivoDescarte    DiscardReason
+  telefoneTentativo String?
+  segmentoTentativo String?
+  dadosBrutos       Json?
+  mensagem          String?
+
+  @@index([motivoDescarte, timestamp])
+  @@index([fonte, timestamp])
+}
+
+model SegmentConfigBsb {
+  id          String            @id @default(cuid())
+  segment     LeadSegment       @unique
+  displayName String
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  presets     SearchPresetBsb[]
+}
+
+model SearchPresetBsb {
+  id           String           @id @default(cuid())
+  name         String
+  source       ScrapeSource
+  query        String
+  startOffset  Int              @default(0)
+  location     String?
+  ll           String?
+  googleDomain String           @default("google.com")
+  hl           String           @default("pt")
+  gl           String           @default("br")
+  maxResults   Int              @default(20)
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  segmentId    String
+  segment      SegmentConfigBsb @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, source])
+  @@index([segmentId, isActive])
+}
+
+model JobExecutionBsb {
+  id             String             @id @default(cuid())
+  queueJobId     String?
+  startedAt      DateTime           @default(now())
+  finishedAt     DateTime?
+  status         JobExecutionStatus @default(running)
+  totalCollected Int                @default(0)
+  totalApproved  Int                @default(0)
+  totalDiscarded Int                @default(0)
+  errorMessage   String?
+  details        Json?
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+}
+
+model AgentConversationMessage {
+  id              String                @id @default(cuid())
+  workflow        String
+  agentSlug       String
+  provider        String
+  conversationKey String
+  phoneNumber     String
+  role            AgentConversationRole
+  content         String                @default("")
+  createdAt       DateTime              @default(now())
+
+  @@index([workflow, agentSlug, conversationKey, createdAt])
+  @@index([workflow, agentSlug, phoneNumber, createdAt])
+}
+
+model AgentConversationSession {
+  id              String   @id @default(cuid())
+  workflow        String
+  agentSlug       String
+  provider        String
+  conversationKey String
+  phoneNumber     String
+  aiPaused        Boolean  @default(false)
+  pausedReason    String?
+  pausedAt        DateTime?
+  lastMessageAt   DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([workflow, agentSlug, conversationKey])
+  @@index([workflow, agentSlug, phoneNumber, updatedAt])
+}
+
+model AgentExecutionRun {
+  id              String               @id @default(cuid())
+  workflow        String
+  agentSlug       String
+  provider        String?
+  conversationKey String?
+  phoneNumber     String?
+  triggerSource   String
+  status          String               @default("running")
+  errorMessage    String?
+  inputPayload    Json?
+  outputPayload   Json?
+  startedAt       DateTime             @default(now())
+  finishedAt      DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  events          AgentExecutionEvent[]
+
+  @@index([workflow, agentSlug, createdAt])
+  @@index([workflow, agentSlug, conversationKey, createdAt])
+  @@index([status, createdAt])
+}
+
+model AgentExecutionEvent {
+  id        String            @id @default(cuid())
+  runId     String
+  stepKey   String
+  title     String
+  nodeType  String            @default("process")
+  status    String            @default("info")
+  payload   Json?
+  createdAt DateTime          @default(now())
+  run       AgentExecutionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@index([stepKey, createdAt])
+}
+
+model LeadDiagnostico {
+  id                String   @id @default(cuid())
+  workflow          String
+  token             String   @unique
+  telefone          String?
+  segmento          String?
+  faturamentoMensal String?
+  numFuncionarios   Int?
+  ferramentas       String?
+  tentativaAnterior String?
+  mudancaOperacao   String?
+  descricaoOperacao String?
+  urgencia          String?
+  maiorDesafio      String?
+  motivacao         String?
+  expectativa       String?
+  rawData           Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([workflow, token])
+  @@index([workflow, telefone])
+}
+
+model LeadAutomacaoTimeline {
+  id         String   @id @default(cuid())
+  workflow   String
+  leadId     String
+  tipo       String
+  etapa      String?
+  direcao    String?
+  mensagem   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([workflow, leadId, createdAt])
+  @@index([workflow, tipo, createdAt])
+}
+
+model AnaliseMaturidade {
+  id           String   @id @default(cuid())
+  workflow     String
+  leadId       String
+  formularioId String
+  arquivoPath  String
+  arquivoUrl   String
+  resumo       String?
+  createdAt    DateTime @default(now())
+
+  @@index([workflow, leadId, createdAt])
+  @@index([formularioId])
+}
+
+model LeadCrm {
+  id             String   @id @default(cuid())
+  workflow       String
+  leadId         String
+  horarioReuniao DateTime
+  dataPrevista   DateTime?
+  observacoes    String?
+  createdAt      DateTime @default(now())
+
+  @@unique([workflow, leadId])
+  @@index([workflow, horarioReuniao])
+}
+
+model ConfigAutomacao {
+  id                   String   @id @default(cuid())
+  workflow             String   @unique
+  horarioInicio        String   @default("08:00")
+  horarioFim           String   @default("20:00")
+  diasPersonalizados   Json     @default("[\"seg\",\"ter\",\"qua\",\"qui\",\"sex\"]")
+  tempoRespostaMin     Int      @default(1)
+  tempoRespostaMax     Int      @default(3)
+  timezone             String   @default("America/Sao_Paulo")
+  followupHorasFup1    Int      @default(24)
+  followupHorasFup2    Int      @default(48)
+  followupDiasFup3     Int      @default(7)
+  followupRecorrenteHx Int      @default(84)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model ConfigTemplate {
+  id           String   @id @default(cuid())
+  workflow     String
+  segmento     String
+  etapa        String
+  templateText String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([workflow, segmento, etapa])
+  @@index([workflow, etapa, isActive])
+}
+
+model ConfigNotificacao {
+  id        String   @id @default(cuid())
+  workflow  String
+  canal     String
+  enabled   Boolean  @default(false)
+  target    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([workflow, canal])
+}
+
+model TaskComercial {
+  id          String   @id @default(cuid())
+  workflow    String
+  leadId      String
+  tipo        String
+  descricao   String
+  status      String   @default("pendente")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([workflow, leadId, status, createdAt])
+}
