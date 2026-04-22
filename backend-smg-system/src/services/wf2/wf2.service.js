@@ -423,6 +423,18 @@ async function processAnalysisForLead({
     );
   }
 
+  const inboundLead = isInboundLead(lead);
+  const introText = inboundLead
+    ? `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua Analise de Maturidade em PDF para voce revisar com calma.`
+    : "Perfeito. Vou te enviar agora sua Analise de Maturidade em PDF.";
+
+  await sendLeadText({
+    agent,
+    provider,
+    lead,
+    text: introText,
+  });
+
   await sendLeadDocument({
     agent,
     provider,
@@ -986,41 +998,87 @@ async function registerInboundMessageEvent({
     };
   }
 
-  const normalizedStatus = String(updatedLead.status || "").toUpperCase();
-  if (token && normalizedStatus === "FORMULARIO_RESPONDIDO") {
+  let leadForNextStep = updatedLead;
+  let normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
+  const hasLinkedForm =
+    Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId)) ||
+    Boolean(leadForNextStep.formularioPreenchido);
+  const shouldAutoAdvanceFromInbound =
+    hasLinkedForm &&
+    isInboundLead(leadForNextStep) &&
+    (normalizedStatus === "FORMULARIO_ENVIADO" || normalizedStatus === "NOVO_LEAD");
+
+  if (shouldAutoAdvanceFromInbound) {
+    leadForNextStep = await tables.lead.update({
+      where: { id: leadForNextStep.id },
+      data: {
+        status: "FORMULARIO_RESPONDIDO",
+        formularioPreenchido: true,
+      },
+    });
+    normalizedStatus = "FORMULARIO_RESPONDIDO";
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: leadForNextStep.id,
+      tipo: "status_atualizado",
+      etapa: "etapa5",
+      direcao: "system",
+      mensagem:
+        "Lead inbound com formulario vinculado detectado. Status atualizado para FORMULARIO_RESPONDIDO.",
+      metadata: {
+        trigger: "inbound_message_with_linked_form",
+        previousStatus: String(updatedLead.status || "").toUpperCase(),
+        diagnosticoFormularioId: textOrEmpty(leadForNextStep.diagnosticoFormularioId) || null,
+      },
+    });
+  }
+
+  const shouldAttemptImmediateAnalysis =
+    normalizedStatus === "FORMULARIO_RESPONDIDO" &&
+    hasLinkedForm &&
+    (Boolean(token) || isInboundLead(leadForNextStep));
+
+  if (shouldAttemptImmediateAnalysis) {
     if (!env.allowOutboundMessages) {
       return {
         foundLead: true,
         suppressAi: true,
         reason: "outbound_disabled",
-        lead: updatedLead,
+        lead: leadForNextStep,
       };
     }
 
-    const agent = await resolveAgentForLead(updatedLead);
+    const agent = await resolveAgentForLead(leadForNextStep);
     const analysisResult = await processAnalysisForLead({
       workflow,
       agent,
       provider,
       prisma,
       tables,
-      lead: updatedLead,
+      lead: leadForNextStep,
       config: await ensureWorkflowConfigRows(prisma, workflow),
     });
     logWf2("info", "inbound.message.token_analysis", {
       explanation:
-        "Token inbound processado e tentativa de envio da analise iniciada automaticamente.",
+        "Mensagem inbound com formulario vinculado processada e tentativa de envio da analise iniciada automaticamente.",
       workflow,
-      leadId: updatedLead.id,
-      token,
+      leadId: leadForNextStep.id,
+      token: token || null,
       analysisProcessed: Boolean(analysisResult.processed),
       reason: analysisResult.reason || null,
     });
     return {
       foundLead: true,
       suppressAi: Boolean(analysisResult.processed),
-      reason: analysisResult.processed ? "analysis_sent_after_token" : "token_processed",
-      lead: updatedLead,
+      reason: analysisResult.processed
+        ? token
+          ? "analysis_sent_after_token"
+          : "analysis_sent_after_form_match"
+        : token
+          ? "token_processed"
+          : "inbound_form_matched",
+      lead: leadForNextStep,
     };
   }
 
@@ -1028,7 +1086,7 @@ async function registerInboundMessageEvent({
     foundLead: true,
     suppressAi: false,
     reason: "inbound_registered",
-    lead: updatedLead,
+    lead: leadForNextStep,
   };
 }
 
