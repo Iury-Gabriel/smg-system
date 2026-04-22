@@ -191,6 +191,21 @@ async function findLeadByPhone(tables, phoneNumber, agentSlug = "") {
   });
 }
 
+async function findLatestDiagnosticoByPhone(prisma, workflow, phoneNumber) {
+  const candidates = buildPhoneCandidates(phoneNumber);
+  if (!candidates.length) return null;
+
+  return prisma.leadDiagnostico.findFirst({
+    where: {
+      workflow,
+      telefone: {
+        in: candidates,
+      },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+}
+
 async function resolveAgentForLead(lead) {
   const slug = textOrEmpty(lead?.agentSlug || "default-sdr");
   return getAgentOrThrow(slug);
@@ -356,11 +371,32 @@ async function processAnalysisForLead({
   config = null,
 }) {
   if (!env.allowOutboundMessages) {
+    logWf2("warn", "analysis.skip.outbound_disabled", {
+      explanation: "Tentativa de gerar/enviar analise bloqueada: outbound desativado.",
+      workflow,
+      leadId: lead?.id || null,
+      leadStatus: String(lead?.status || "").toUpperCase() || null,
+    });
     return { processed: false, reason: "outbound_disabled" };
   }
 
-  if (!lead?.automationActive) return { processed: false, reason: "automation_inactive" };
+  if (!lead?.automationActive) {
+    logWf2("warn", "analysis.skip.automation_inactive", {
+      explanation: "Tentativa de gerar/enviar analise ignorada: automacao inativa.",
+      workflow,
+      leadId: lead?.id || null,
+      leadStatus: String(lead?.status || "").toUpperCase() || null,
+    });
+    return { processed: false, reason: "automation_inactive" };
+  }
   if (String(lead.status || "").toUpperCase() !== "FORMULARIO_RESPONDIDO") {
+    logWf2("warn", "analysis.skip.status_not_ready", {
+      explanation:
+        "Tentativa de gerar/enviar analise ignorada: status diferente de FORMULARIO_RESPONDIDO.",
+      workflow,
+      leadId: lead?.id || null,
+      leadStatus: String(lead?.status || "").toUpperCase() || null,
+    });
     return { processed: false, reason: "status_not_ready" };
   }
 
@@ -374,6 +410,13 @@ async function processAnalysisForLead({
       direcao: "system",
       mensagem: "Lead sem diagnostico_formulario_id para gerar analise.",
       metadata: {},
+    });
+    logWf2("warn", "analysis.skip.missing_form_id", {
+      explanation:
+        "Tentativa de gerar/enviar analise ignorada: lead sem diagnosticoFormularioId.",
+      workflow,
+      leadId: lead?.id || null,
+      leadStatus: String(lead?.status || "").toUpperCase() || null,
     });
     return { processed: false, reason: "missing_form_id" };
   }
@@ -390,6 +433,13 @@ async function processAnalysisForLead({
       direcao: "system",
       mensagem: "Formulario de diagnostico nao encontrado.",
       metadata: { formId },
+    });
+    logWf2("warn", "analysis.skip.form_not_found", {
+      explanation:
+        "Tentativa de gerar/enviar analise ignorada: formulario vinculado nao encontrado.",
+      workflow,
+      leadId: lead?.id || null,
+      formId,
     });
     return { processed: false, reason: "form_not_found" };
   }
@@ -494,6 +544,16 @@ async function processAnalysisForLead({
       model: aiResult.model || null,
       usedFallback: Boolean(aiResult.usedFallback),
     },
+  });
+
+  logWf2("info", "analysis.sent.success", {
+    explanation: "Analise de maturidade enviada e lead avancado para ANALISE_ENVIADA.",
+    workflow,
+    leadId: lead?.id || null,
+    formId: form.id,
+    analysisUrl: file.publicUrl,
+    aiModel: aiResult.model || null,
+    usedFallback: Boolean(aiResult.usedFallback),
   });
 
   return {
@@ -1000,13 +1060,78 @@ async function registerInboundMessageEvent({
 
   let leadForNextStep = updatedLead;
   let normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
-  const hasLinkedForm =
-    Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId)) ||
-    Boolean(leadForNextStep.formularioPreenchido);
+  let linkedForm = null;
+
+  const currentFormId = textOrEmpty(leadForNextStep.diagnosticoFormularioId);
+  if (currentFormId) {
+    linkedForm = await prisma.leadDiagnostico.findUnique({
+      where: { id: currentFormId },
+    });
+  }
+  if (!linkedForm) {
+    linkedForm = await findLatestDiagnosticoByPhone(
+      prisma,
+      workflow,
+      leadForNextStep.telefone || phoneNumber
+    );
+  }
+
+  logWf2("info", "inbound.message.form_resolution", {
+    explanation:
+      "Resultado da resolucao de formulario para o inbound antes dos gates de status/analise.",
+    workflow,
+    leadId: leadForNextStep.id,
+    leadPhone: leadForNextStep.telefone || null,
+    currentFormId: currentFormId || null,
+    resolvedFormId: linkedForm?.id || null,
+    resolvedByPhoneMatch: Boolean(!currentFormId && linkedForm?.id),
+    formularioPreenchido: Boolean(leadForNextStep.formularioPreenchido),
+    status: normalizedStatus,
+    pipelineOrigin: textOrEmpty(leadForNextStep.pipelineOrigin) || null,
+  });
+
+  if (linkedForm && linkedForm.id !== currentFormId) {
+    const previousFormId = currentFormId || null;
+    leadForNextStep = await tables.lead.update({
+      where: { id: leadForNextStep.id },
+      data: {
+        diagnosticoFormularioId: linkedForm.id,
+        formularioPreenchido: true,
+      },
+    });
+    normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: leadForNextStep.id,
+      tipo: "formulario_vinculado_automaticamente",
+      etapa: "etapa5",
+      direcao: "system",
+      mensagem:
+        "Formulario vinculado automaticamente ao lead durante inbound via correspondencia de telefone.",
+      metadata: {
+        previousFormId,
+        resolvedFormId: linkedForm.id,
+        trigger: "inbound_phone_form_match",
+      },
+    });
+  }
+
+  const hasLinkedForm = Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId));
   const shouldAutoAdvanceFromInbound =
     hasLinkedForm &&
     isInboundLead(leadForNextStep) &&
     (normalizedStatus === "FORMULARIO_ENVIADO" || normalizedStatus === "NOVO_LEAD");
+
+  logWf2("info", "inbound.message.auto_advance_gate", {
+    explanation: "Resultado do gate de auto-avanco para FORMULARIO_RESPONDIDO.",
+    workflow,
+    leadId: leadForNextStep.id,
+    hasLinkedForm,
+    isInboundLead: isInboundLead(leadForNextStep),
+    status: normalizedStatus,
+    shouldAutoAdvanceFromInbound,
+  });
 
   if (shouldAutoAdvanceFromInbound) {
     leadForNextStep = await tables.lead.update({
@@ -1039,8 +1164,25 @@ async function registerInboundMessageEvent({
     hasLinkedForm &&
     (Boolean(token) || isInboundLead(leadForNextStep));
 
+  logWf2("info", "inbound.message.analysis_gate", {
+    explanation: "Resultado do gate de tentativa imediata de envio da analise.",
+    workflow,
+    leadId: leadForNextStep.id,
+    status: normalizedStatus,
+    hasLinkedForm,
+    tokenDetected: Boolean(token),
+    isInboundLead: isInboundLead(leadForNextStep),
+    shouldAttemptImmediateAnalysis,
+  });
+
   if (shouldAttemptImmediateAnalysis) {
     if (!env.allowOutboundMessages) {
+      logWf2("warn", "inbound.message.analysis_gate_blocked", {
+        explanation: "Gate de analise passou, mas outbound esta desativado.",
+        workflow,
+        leadId: leadForNextStep.id,
+        reason: "outbound_disabled",
+      });
       return {
         foundLead: true,
         suppressAi: true,
@@ -1068,6 +1210,20 @@ async function registerInboundMessageEvent({
       analysisProcessed: Boolean(analysisResult.processed),
       reason: analysisResult.reason || null,
     });
+
+    if (!analysisResult.processed) {
+      logWf2("warn", "inbound.message.analysis_not_sent", {
+        explanation:
+          "Tentativa imediata de analise foi executada, mas nao concluiu envio. IA podera seguir fluxo normal.",
+        workflow,
+        leadId: leadForNextStep.id,
+        reason: analysisResult.reason || "unknown",
+        status: normalizedStatus,
+        hasLinkedForm,
+        tokenDetected: Boolean(token),
+      });
+    }
+
     return {
       foundLead: true,
       suppressAi: Boolean(analysisResult.processed),
@@ -1081,6 +1237,17 @@ async function registerInboundMessageEvent({
       lead: leadForNextStep,
     };
   }
+
+  logWf2("warn", "inbound.message.analysis_gate_not_met", {
+    explanation:
+      "Inbound seguiu para IA porque o gate de analise imediata nao foi atendido.",
+    workflow,
+    leadId: leadForNextStep.id,
+    status: normalizedStatus,
+    hasLinkedForm,
+    tokenDetected: Boolean(token),
+    isInboundLead: isInboundLead(leadForNextStep),
+  });
 
   return {
     foundLead: true,

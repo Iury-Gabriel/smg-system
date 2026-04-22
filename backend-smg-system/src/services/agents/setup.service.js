@@ -6,6 +6,9 @@ const { getAgentOrThrow, invalidateAgentsCache } = require("./registry.service")
 const ENV_FILE_PATH = path.resolve(
   String(process.env.AGENT_SETUP_ENV_FILE_PATH || path.join(process.cwd(), ".env"))
 );
+const AGENT_SETUP_PERSIST_TO_ENV_FILE =
+  String(process.env.AGENT_SETUP_PERSIST_TO_ENV_FILE || "true").toLowerCase() !==
+  "false";
 
 function toEnvSafeSlug(slug) {
   return String(slug || "")
@@ -295,12 +298,19 @@ function updateAgentSetup(agentSlug, values = {}) {
     process.env[field.envKey] = value;
   }
 
+  let persistedToEnvFile = false;
   if (Object.keys(updatesByEnvKey).length > 0) {
-    upsertEnvVars(updatesByEnvKey);
+    if (AGENT_SETUP_PERSIST_TO_ENV_FILE) {
+      upsertEnvVars(updatesByEnvKey);
+      persistedToEnvFile = true;
+    }
     invalidateAgentsCache();
   }
 
-  return getAgentSetup(agent.slug);
+  return {
+    ...getAgentSetup(agent.slug),
+    persistedToEnvFile,
+  };
 }
 
 module.exports = {

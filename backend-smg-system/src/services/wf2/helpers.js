@@ -31,16 +31,40 @@ function buildPhoneCandidates(rawPhone) {
   const digits = normalizePhone(rawPhone);
   if (!digits) return [];
 
-  const candidates = new Set([digits, `+${digits}`]);
-  if (!digits.startsWith("55") && digits.length >= 10) {
-    candidates.add(`55${digits}`);
-    candidates.add(`+55${digits}`);
-  }
-  if (digits.startsWith("55")) {
-    const withoutCountry = digits.slice(2);
-    if (withoutCountry.length >= 10) {
-      candidates.add(withoutCountry);
-      candidates.add(`+${withoutCountry}`);
+  const candidates = new Set();
+  const addDigitsVariant = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return;
+    candidates.add(raw);
+    candidates.add(`+${raw}`);
+
+    if (raw.startsWith("55")) {
+      const withoutCountry = raw.slice(2);
+      if (withoutCountry.length >= 10) {
+        candidates.add(withoutCountry);
+        candidates.add(`+${withoutCountry}`);
+      }
+      return;
+    }
+
+    if (raw.length >= 10) {
+      candidates.add(`55${raw}`);
+      candidates.add(`+55${raw}`);
+    }
+  };
+
+  addDigitsVariant(digits);
+
+  // Compatibilidade BR: considera versoes com/sem o nono digito em celulares.
+  const localDigits = digits.startsWith("55") ? digits.slice(2) : digits;
+  if (localDigits.length >= 10) {
+    const ddd = localDigits.slice(0, 2);
+    const number = localDigits.slice(2);
+
+    if (number.length === 8) {
+      addDigitsVariant(`${ddd}9${number}`);
+    } else if (number.length === 9 && number.startsWith("9")) {
+      addDigitsVariant(`${ddd}${number.slice(1)}`);
     }
   }
 

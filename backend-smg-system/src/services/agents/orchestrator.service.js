@@ -1460,6 +1460,16 @@ async function queueInboundForOrchestrator({
         conversationKey,
       };
     }
+
+    logOrchestrator("warn", "queue.inbound.wf2_passed_to_ai", {
+      explanation:
+        "WF2 nao suprimiu resposta. O inbound sera encaminhado para o fluxo da IA.",
+      agentSlug: agent.slug,
+      conversationKey,
+      wf2Reason: wf2Result?.reason || "unknown",
+      foundLead: Boolean(wf2Result?.foundLead),
+      suppressAi: Boolean(wf2Result?.suppressAi),
+    });
   }
 
   const session = await getConversationSession({

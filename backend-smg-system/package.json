@@ -16,7 +16,8 @@
     "prisma:seed": "node prisma/seed.js",
     "seed": "node prisma/seed.js",
     "seed:smg": "node prisma/seed.js --workflow=smg",
-    "seed:bsb": "node prisma/seed.js --workflow=bsb"
+    "seed:bsb": "node prisma/seed.js --workflow=bsb",
+    "test:e2e:wf2-inbound": "node scripts/test-wf2-inbound-e2e.js"
   },
   "dependencies": {
     "@langchain/core": "^0.3.68",
