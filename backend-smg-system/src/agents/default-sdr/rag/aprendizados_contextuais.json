@@ -1,0 +1,17 @@
+[
+  {
+    "segmento": "all",
+    "etapa": "NOVO_LEAD",
+    "padrao": "Na abertura outbound, usar uma dor operacional especifica do segmento e finalizar com apenas uma pergunta curta de continuidade.",
+    "origem": "base_clara",
+    "tags": ["abertura", "cta_unico"]
+  },
+  {
+    "segmento": "all",
+    "etapa": "FORMULARIO_RESPONDIDO",
+    "padrao": "Apos formulario respondido, contextualizar o principal desafio declarado pelo lead antes de propor proximo passo para diagnostico.",
+    "origem": "base_clara",
+    "tags": ["analise", "contexto_formulario"]
+  }
+]
+

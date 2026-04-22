@@ -12,10 +12,13 @@ const {
 const { generateAiReply } = require("../../lib/ai-client");
 const { buildTypingChunks } = require("../../utils/whatsapp-message");
 const { normalizePhone, textOrEmpty } = require("./helpers");
+const { getWorkflowTables } = require("../workflow-data-access.service");
+const { buildPhoneCandidates, normalizeE164, isWithinAutomationSchedule } = require("../wf2/helpers");
 const { getAgentOrThrow, getAgentProviderConfig } = require("./registry.service");
 const { sendMetaTextMessage } = require("./providers/meta.provider");
 const { sendUazapiTextMessage } = require("./providers/uazapi.provider");
 const { registerInboundMessageEvent } = require("../wf2/wf2.service");
+const { retrieveAgentRagContext } = require("./rag.service");
 const {
   createExecutionRun,
   appendExecutionEvent,
@@ -47,6 +50,198 @@ function safeJson(value, max = 6000) {
   } catch (_error) {
     return "<unserializable_payload>";
   }
+}
+
+function promptJson(value, max = 5000) {
+  try {
+    const raw = JSON.stringify(value, null, 2);
+    if (!raw) return "{}";
+    return raw.length > max ? `${raw.slice(0, max)}...<truncated>` : raw;
+  } catch (_error) {
+    return "{}";
+  }
+}
+
+function resolveEtapaAtualFromStatus(statusInput = "") {
+  const status = String(statusInput || "").trim().toUpperCase();
+  const mapping = {
+    NOVO_LEAD: "1",
+    INTERMEDIARIO_IDENTIFICADO: "3",
+    DECISOR_IDENTIFICADO: "3",
+    FORMULARIO_ENVIADO: "5",
+    FORMULARIO_RESPONDIDO: "6",
+    ANALISE_ENVIADA: "7",
+    FUP_SEM_RESPOSTA: "7",
+    DIAGNOSTICO_AGENDADO: "8",
+    DESQUALIFICADO: "8",
+  };
+  return mapping[status] || "1";
+}
+
+function toConversationPayloadHistory(historyItems = [], limit = 20) {
+  const rows = Array.isArray(historyItems) ? historyItems : [];
+  const slice = rows.slice(-Math.max(1, Number(limit) || 20));
+  return slice.map((item) => ({
+    role: item?.role === "ai" ? "assistant" : "user",
+    content: String(item?.content || "").trim(),
+    timestamp: item?.createdAt ? new Date(item.createdAt).toISOString() : new Date().toISOString(),
+  }));
+}
+
+function summarizeHistoryForPayload(history = []) {
+  if (!Array.isArray(history) || !history.length) return null;
+  const human = history.filter((item) => item.role === "user");
+  const assistant = history.filter((item) => item.role === "assistant");
+  const lastHuman = human[human.length - 1]?.content || "";
+  const lastAssistant = assistant[assistant.length - 1]?.content || "";
+  return [
+    `Historico truncado para ${history.length} mensagens.`,
+    lastAssistant ? `Ultima mensagem da Clara: "${String(lastAssistant).slice(0, 140)}"` : null,
+    lastHuman ? `Ultima mensagem do lead: "${String(lastHuman).slice(0, 140)}"` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function findLeadForInboundContext({ tables, senderNumber, agentSlug = "" }) {
+  const candidates = buildPhoneCandidates(senderNumber);
+  if (!candidates.length) return null;
+
+  const normalizedAgentSlug = textOrEmpty(agentSlug);
+  const where = {
+    telefone: {
+      in: candidates,
+    },
+  };
+  if (normalizedAgentSlug) {
+    where.agentSlug = normalizedAgentSlug;
+  }
+
+  const firstMatch = await tables.lead.findFirst({
+    where,
+    orderBy: { criadoEm: "desc" },
+  });
+  if (firstMatch || normalizedAgentSlug) {
+    return firstMatch;
+  }
+
+  return tables.lead.findFirst({
+    where: {
+      telefone: {
+        in: candidates,
+      },
+    },
+    orderBy: { criadoEm: "desc" },
+  });
+}
+
+function mapFormularioPayload(form) {
+  if (!form) return null;
+  return {
+    segmento: textOrEmpty(form.segmento),
+    faturamento_mensal: textOrEmpty(form.faturamentoMensal),
+    num_funcionarios:
+      form.numFuncionarios === undefined || form.numFuncionarios === null
+        ? ""
+        : String(form.numFuncionarios),
+    ferramentas_usadas: textOrEmpty(form.ferramentas),
+    maior_desafio: textOrEmpty(form.maiorDesafio),
+    urgencia: textOrEmpty(form.urgencia),
+    motivacao: textOrEmpty(form.motivacao),
+    expectativa: textOrEmpty(form.expectativa),
+    tentativa_anterior: textOrEmpty(form.tentativaAnterior),
+  };
+}
+
+async function resolveHorarioValido({ prisma, workflow }) {
+  try {
+    if (!prisma?.configAutomacao?.findUnique) return true;
+    const config = await prisma.configAutomacao.findUnique({
+      where: {
+        workflow,
+      },
+    });
+    if (!config) return true;
+    return Boolean(isWithinAutomationSchedule(config, new Date()));
+  } catch (_error) {
+    return true;
+  }
+}
+
+async function buildInboundPayloadContext({
+  agent,
+  workflow,
+  prisma,
+  senderNumber,
+  historyItems,
+  messages,
+}) {
+  const tables = getWorkflowTables(prisma, workflow);
+  const lead = await findLeadForInboundContext({
+    tables,
+    senderNumber: normalizeE164(senderNumber) || senderNumber,
+    agentSlug: agent.slug,
+  });
+
+  const historyPayload = toConversationPayloadHistory(historyItems, 20);
+  const historyTruncated = Array.isArray(historyItems) && historyItems.length > historyPayload.length;
+  const historySummary = historyTruncated ? summarizeHistoryForPayload(historyPayload) : null;
+
+  let formulario = null;
+  if (lead?.diagnosticoFormularioId && prisma?.leadDiagnostico?.findUnique) {
+    formulario = await prisma.leadDiagnostico
+      .findUnique({
+        where: {
+          id: String(lead.diagnosticoFormularioId),
+        },
+      })
+      .catch(() => null);
+  }
+
+  const status = textOrEmpty(lead?.status || "NOVO_LEAD");
+  const payload = {
+    lead: {
+      status: status || "NOVO_LEAD",
+      pipeline_origin: textOrEmpty(lead?.pipelineOrigin || "automacao"),
+      segmento: textOrEmpty(lead?.segmento || "outro"),
+      nome: textOrEmpty(lead?.nome || "Lead"),
+      empresa: textOrEmpty(lead?.empresa || "Empresa"),
+    },
+    conversation: {
+      history: historyPayload,
+      history_truncated: historyTruncated,
+      history_summary: historySummary,
+    },
+    formulario: mapFormularioPayload(formulario),
+    aprendizados_contextuais: [],
+    config: {
+      etapa_atual: resolveEtapaAtualFromStatus(status),
+      pipeline_origin: textOrEmpty(lead?.pipelineOrigin || "automacao"),
+      horario_valido: await resolveHorarioValido({ prisma, workflow }),
+    },
+  };
+
+  const ragResult = retrieveAgentRagContext({
+    agent,
+    payload,
+    messages,
+    maxItems: 5,
+    maxContextChars: 4200,
+  });
+  payload.aprendizados_contextuais = ragResult.contextualLearnings.map((item) => ({
+    segmento: item.segmento,
+    etapa: item.etapa,
+    padrao: item.padrao,
+    origem: item.origem,
+  }));
+
+  return {
+    payload,
+    lead,
+    ragContextText: ragResult.contextText,
+    ragChunks: ragResult.chunks,
+    contextualLearnings: ragResult.contextualLearnings,
+  };
 }
 
 async function logExecutionEvent(workflow, runId, payload) {
@@ -121,7 +316,7 @@ function formatConversationHistory(historyItems) {
     .join("\n");
 }
 
-function buildSystemPrompt({ agent, promptText, tools }) {
+function buildSystemPrompt({ agent, promptText, tools, ragContextText = "" }) {
   const toolLines = Array.isArray(tools)
     ? tools
         .map((tool) => {
@@ -145,12 +340,21 @@ function buildSystemPrompt({ agent, promptText, tools }) {
       ? `Descricao do agente: ${textOrEmpty(agent.description)}.`
       : null,
     promptText ? `Prompt base do agente:\n${promptText}` : null,
+    textOrEmpty(ragContextText)
+      ? `Contexto RAG recuperado para esta interacao:\n${ragContextText}`
+      : null,
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-function buildUserPrompt({ senderName, senderNumber, historyItems, messages }) {
+function buildUserPrompt({
+  senderName,
+  senderNumber,
+  historyItems,
+  messages,
+  payloadContext = null,
+}) {
   const mergedMessages = messages
     .map((item, index) => `Mensagem ${index + 1}: ${String(item?.text || "").trim()}`)
     .filter(Boolean)
@@ -162,6 +366,9 @@ function buildUserPrompt({ senderName, senderNumber, historyItems, messages }) {
     formatConversationHistory(historyItems),
     "Mensagens recebidas em buffer:",
     mergedMessages,
+    payloadContext
+      ? `Payload operacional atual:\n${promptJson(payloadContext, 5500)}`
+      : null,
     "Responda como atendente comercial e continue a conversa de forma natural.",
   ].join("\n\n");
 }
@@ -640,16 +847,58 @@ async function processBufferedConversation(jobPayload) {
       },
     });
 
+    const inboundContext = await buildInboundPayloadContext({
+      agent,
+      workflow,
+      prisma,
+      senderNumber,
+      historyItems,
+      messages,
+    });
+    await logExecutionEvent(workflow, executionRun?.id, {
+      stepKey: "payload_context_resolved",
+      title: "Payload operacional consolidado para o LLM",
+      nodeType: "process",
+      status: "success",
+      payload: {
+        leadStatus: inboundContext?.payload?.lead?.status || null,
+        pipelineOrigin: inboundContext?.payload?.lead?.pipeline_origin || null,
+        segmento: inboundContext?.payload?.lead?.segmento || null,
+        hasFormulario: Boolean(inboundContext?.payload?.formulario),
+        learningsCount: Number(inboundContext?.contextualLearnings?.length || 0),
+      },
+    });
+
+    if (Array.isArray(inboundContext?.ragChunks) && inboundContext.ragChunks.length) {
+      logOrchestrator("info", "buffer.process.rag_context", {
+        explanation:
+          "Trechos de conhecimento recuperados do RAG para contextualizar a resposta da Clara.",
+        agentSlug: agent.slug,
+        conversationKey: jobPayload.conversationKey,
+        selectedSources: inboundContext.ragChunks.map((item) => ({
+          source: item.sourceId,
+          score: item.score,
+        })),
+        learnings: (inboundContext.contextualLearnings || []).map((item) => ({
+          segmento: item.segmento,
+          etapa: item.etapa,
+          origem: item.origem,
+        })),
+      });
+    }
+
     const systemPrompt = buildSystemPrompt({
       agent,
       promptText,
       tools,
+      ragContextText: inboundContext?.ragContextText || "",
     });
     const userPrompt = buildUserPrompt({
       senderName: String(lastMessage?.senderName || "").trim(),
       senderNumber,
       historyItems,
       messages,
+      payloadContext: inboundContext?.payload || null,
     });
 
     logOrchestrator("info", "buffer.process.ai_prompt", {

@@ -112,9 +112,9 @@ function parseValidDate(value) {
 
 module.exports = {
   slug: "default-sdr",
-  name: "SMG WF2 Qualificacao",
+  name: "Clara",
   description:
-    "Agente de IA do WF2 (qualificacao) para outbound e inbound via WhatsApp.",
+    "Clara, agente de IA do WF2 para qualificacao e agendamento de diagnostico via WhatsApp.",
   workflow: process.env.AGENT_DEFAULT_SDR_WORKFLOW || "smg",
   wf2: {
     enabled: true,
