@@ -17,7 +17,7 @@ const { buildPhoneCandidates, normalizeE164, isWithinAutomationSchedule } = requ
 const { getAgentOrThrow, getAgentProviderConfig } = require("./registry.service");
 const { sendMetaTextMessage } = require("./providers/meta.provider");
 const { sendUazapiTextMessage } = require("./providers/uazapi.provider");
-const { registerInboundMessageEvent } = require("../wf2/wf2.service");
+const { registerInboundMessageEvent, startOutboundFromCommand } = require("../wf2/wf2.service");
 const { retrieveAgentRagContext } = require("./rag.service");
 const {
   createExecutionRun,
@@ -68,6 +68,29 @@ function isClearMemoryCommand(value = "") {
 
   const firstToken = normalized.split(/\s+/)[0]?.replace(/[.,;:!?]+$/g, "") || "";
   return firstToken === "/clear";
+}
+
+function parseStartOutboundCommand(value = "") {
+  const original = textOrEmpty(value).trim();
+  if (!original) return null;
+
+  const normalized = original.toLowerCase();
+  const firstToken = normalized.split(/\s+/)[0]?.replace(/[.,;:!?]+$/g, "") || "";
+  const isStartToken =
+    firstToken === "/start" || firstToken.startsWith("/start=") || firstToken.startsWith("/start:");
+  if (!isStartToken) return null;
+
+  let tail = original.slice(6).trim();
+  if (tail.startsWith("=") || tail.startsWith(":")) {
+    tail = tail.slice(1).trim();
+  }
+  tail = tail.replace(/^nicho[\s:=_-]*/i, "").trim();
+  const segmentHint = tail ? String(tail.split(/\s+/)[0] || "").trim() : "";
+
+  return {
+    command: "/start",
+    segmentHint,
+  };
 }
 
 function resolveEtapaAtualFromStatus(statusInput = "") {
@@ -1386,6 +1409,52 @@ async function queueInboundForOrchestrator({
       destinationNumber,
     },
   });
+
+  const startCommand = parseStartOutboundCommand(text);
+  if (agent?.wf2?.enabled && startCommand) {
+    const startResult = await startOutboundFromCommand({
+      agentSlug: agent.slug,
+      workflow,
+      provider: inboundProvider,
+      phoneNumber: senderNumber,
+      profileName: textOrEmpty(event?.profileName),
+      segmentHint: startCommand.segmentHint,
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "outbound_start_command",
+      title: "Comando /start processado",
+      nodeType: "process",
+      status: startResult?.processed ? "success" : "warning",
+      payload: {
+        command: "/start",
+        segmentHint: startCommand.segmentHint || null,
+        processed: Boolean(startResult?.processed),
+        reason: startResult?.reason || null,
+        leadId: startResult?.lead?.id || null,
+        segmentApplied: startResult?.segmentApplied || null,
+      },
+    });
+
+    if (!startResult?.processed && textOrEmpty(startResult?.immediateReply)) {
+      await sendTextByProvider({
+        agent,
+        provider: inboundProvider,
+        to: senderNumber,
+        text: startResult.immediateReply,
+      });
+    }
+
+    return {
+      handled: true,
+      ignored: false,
+      reason: startResult?.reason || "outbound_start_command",
+      buffered: false,
+      startedOutbound: Boolean(startResult?.processed),
+      conversationKey,
+      startResult,
+    };
+  }
 
   if (aiConfig.clearMemoryCommandEnabled && isClearMemoryCommand(text)) {
     const clearResult = await clearConversationAndPendingBuffer({

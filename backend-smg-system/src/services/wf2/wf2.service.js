@@ -37,6 +37,35 @@ const ANALYSIS_SEQUENCE_DELAY_MS = Math.max(
 );
 const analysisInFlightLocks = new Set();
 const OPT_OUT_REGEX = /\b(parar|sair|remover|nao quero|não quero|stop|cancelar|opt[\s-]?out)\b/i;
+const START_SEGMENT_ALIASES = {
+  dentista: "dentista",
+  odontologia: "dentista",
+  nutri: "nutricionista",
+  nutricionista: "nutricionista",
+  fisio: "fisioterapeuta",
+  fisioterapeuta: "fisioterapeuta",
+  fisioterapia: "fisioterapeuta",
+  dermato: "dermatologista",
+  dermatologista: "dermatologista",
+  ortopedia: "ortopedista",
+  ortopedista: "ortopedista",
+  barbeiro: "barbearia",
+  barbearia: "barbearia",
+  estetica: "estetica",
+  corretor: "corretor",
+  corretora: "corretor",
+  imobiliaria: "corretor",
+  restaurante: "restaurante",
+  gastronomia: "restaurante",
+  automovel: "automovel",
+  automotivo: "automovel",
+  auto: "automovel",
+  construtora: "construtora",
+  construcao: "construtora",
+  engenharia: "engenharia",
+  arquitetura: "arquitetura",
+  outro: "outro",
+};
 
 function logWf2(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -60,6 +89,36 @@ function asLeadSegment(value, fallback = LeadSegment.outro) {
   const values = Object.values(LeadSegment);
   const found = values.find((item) => String(item).toLowerCase() === raw);
   return found || fallback;
+}
+
+function normalizeCommandText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function resolveStartSegment(rawSegment = "") {
+  const normalized = normalizeCommandText(rawSegment)
+    .replace(/^nicho[\s:=-]*/i, "")
+    .replace(/[.,;!?]+$/g, "")
+    .trim();
+  if (!normalized) {
+    return { hasSegmentHint: false, segment: null };
+  }
+
+  const firstToken = normalized.split(/\s+/)[0] || "";
+  const mapped = START_SEGMENT_ALIASES[firstToken] || "";
+  if (!mapped) {
+    return { hasSegmentHint: true, segment: null, invalidInput: firstToken };
+  }
+
+  return {
+    hasSegmentHint: true,
+    segment: asLeadSegment(mapped, LeadSegment.outro),
+    invalidInput: null,
+  };
 }
 
 function isInboundLead(lead) {
@@ -936,6 +995,8 @@ async function processNewOutboundLead({
   config,
   lead,
   agent,
+  providerOverride = null,
+  ignoreSchedule = false,
 }) {
   if (!env.allowOutboundMessages) {
     return { processed: false, reason: "outbound_disabled" };
@@ -946,7 +1007,7 @@ async function processNewOutboundLead({
   if (String(lead.status || "").toUpperCase() !== "NOVO_LEAD") {
     return { processed: false, reason: "status_not_novo_lead" };
   }
-  if (!isWithinAutomationSchedule(config)) {
+  if (!ignoreSchedule && !isWithinAutomationSchedule(config)) {
     return { processed: false, reason: "outside_schedule" };
   }
 
@@ -966,7 +1027,7 @@ async function processNewOutboundLead({
 
   await sendLeadText({
     agent,
-    provider: agent.defaultProvider,
+    provider: providerOverride || agent.defaultProvider,
     lead,
     text: message,
     forceTemplateName: textOrEmpty(agent?.providers?.meta?.templates?.initialOutbound),
@@ -996,7 +1057,7 @@ async function processNewOutboundLead({
     direcao: "outbound",
     mensagem: clipText(message, 500),
     metadata: {
-      provider: agent.defaultProvider,
+      provider: normalizeProvider(providerOverride || agent.defaultProvider) || agent.defaultProvider,
     },
   });
 
@@ -1993,9 +2054,171 @@ async function createDiagnosticoFromPayload({
   };
 }
 
+async function startOutboundFromCommand({
+  agentSlug = "default-sdr",
+  workflow: workflowInput,
+  provider = "",
+  phoneNumber,
+  profileName = "",
+  segmentHint = "",
+}) {
+  const workflow = resolveWorkflow(workflowInput);
+  const prisma = getPrisma(workflow);
+  const tables = getWorkflowTables(prisma, workflow);
+  const normalizedPhone = normalizeE164(phoneNumber);
+  if (!normalizedPhone) {
+    return {
+      processed: false,
+      reason: "invalid_phone",
+      immediateReply: "Nao consegui identificar seu numero para iniciar o teste outbound.",
+    };
+  }
+
+  const parsedSegment = resolveStartSegment(segmentHint);
+  if (parsedSegment.hasSegmentHint && !parsedSegment.segment) {
+    return {
+      processed: false,
+      reason: "invalid_segment",
+      immediateReply:
+        "Segmento invalido no /start. Use, por exemplo, /start=dentista, /start=barbearia ou /start=restaurante.",
+    };
+  }
+
+  const normalizedAgentSlug = textOrEmpty(agentSlug || "default-sdr") || "default-sdr";
+  let lead = await findLeadByPhone(tables, normalizedPhone, normalizedAgentSlug);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const chosenSegment = parsedSegment.hasSegmentHint
+    ? parsedSegment.segment
+    : asLeadSegment(lead?.segmento || "outro");
+
+  if (!lead) {
+    lead = await tables.lead.create({
+      data: {
+        id: crypto.randomUUID(),
+        nome: textOrEmpty(profileName) || "Lead Teste",
+        telefone: normalizedPhone,
+        empresa: `Empresa Teste ${normalizedPhone.slice(-4)}`,
+        segmento: chosenSegment,
+        endereco: "Nao informado",
+        site: null,
+        email: null,
+        fonteOrigem: ScrapeSource.manual,
+        agentSlug: normalizedAgentSlug,
+        status: "NOVO_LEAD",
+        canalAquisicao: "outbound_start_command",
+        pipelineOrigin: "automacao",
+        automationActive: true,
+        formularioPreenchido: false,
+        diagnosticoFormularioId: null,
+        ultimaInteracao: now,
+        ultimoEnvioIa: null,
+        proximoFollowupEm: null,
+        followupNivel: 0,
+        dadosBrutos: mergeDadosBrutos(null, {
+          wf2: {
+            startedByCommand: true,
+            startCommandAt: nowIso,
+            startCommandSegment: chosenSegment,
+            etapa1SentAt: null,
+            etapaAtual: "etapa1_pending",
+            analysisAwaitingReadConfirmation: false,
+            analysisReadConfirmedAt: null,
+            analysisDeliveryStep: null,
+          },
+        }),
+      },
+    });
+  } else {
+    const nextSegment = parsedSegment.hasSegmentHint
+      ? chosenSegment
+      : asLeadSegment(lead.segmento || chosenSegment, chosenSegment);
+    lead = await tables.lead.update({
+      where: { id: lead.id },
+      data: {
+        nome: textOrEmpty(profileName) || lead.nome,
+        segmento: nextSegment,
+        status: "NOVO_LEAD",
+        canalAquisicao: "outbound_start_command",
+        pipelineOrigin: "automacao",
+        automationActive: true,
+        ultimaInteracao: now,
+        ultimoEnvioIa: null,
+        proximoFollowupEm: null,
+        followupNivel: 0,
+        dadosBrutos: mergeDadosBrutos(lead.dadosBrutos, {
+          wf2: {
+            startedByCommand: true,
+            startCommandAt: nowIso,
+            startCommandSegment: nextSegment,
+            previousStatusBeforeStart: String(lead.status || "").toUpperCase() || null,
+            etapa1SentAt: null,
+            etapaAtual: "etapa1_pending",
+            analysisAwaitingReadConfirmation: false,
+            analysisReadConfirmedAt: null,
+            analysisDeliveryStep: null,
+          },
+        }),
+      },
+    });
+  }
+
+  await appendTimeline(prisma, {
+    workflow,
+    leadId: lead.id,
+    tipo: "start_command",
+    etapa: "etapa1",
+    direcao: "system",
+    mensagem: "Fluxo outbound iniciado via comando /start.",
+    metadata: {
+      segmentHint: parsedSegment.hasSegmentHint ? String(chosenSegment) : null,
+      provider: normalizeProvider(provider) || provider || null,
+    },
+  });
+
+  const agent = getAgentOrThrow(normalizedAgentSlug);
+  const config = await ensureWorkflowConfigRows(prisma, workflow);
+  const outboundResult = await processNewOutboundLead({
+    workflow,
+    prisma,
+    tables,
+    config,
+    lead,
+    agent,
+    providerOverride: normalizeProvider(provider) || provider || null,
+    ignoreSchedule: true,
+  });
+
+  if (!outboundResult?.processed) {
+    const immediateReply =
+      outboundResult?.reason === "outbound_disabled"
+        ? "O comando /start foi recebido, mas o envio outbound esta desativado na configuracao."
+        : "Recebi o /start, mas nao consegui iniciar o outbound agora. Tenta novamente em instantes.";
+    return {
+      processed: false,
+      reason: outboundResult?.reason || "outbound_not_started",
+      lead: leadSummary(lead),
+      immediateReply,
+    };
+  }
+
+  const updatedLead = await tables.lead.findUnique({
+    where: { id: lead.id },
+  });
+
+  return {
+    processed: true,
+    reason: "outbound_started_by_command",
+    lead: leadSummary(updatedLead || lead),
+    segmentApplied: String((updatedLead || lead)?.segmento || chosenSegment),
+    immediateReply: null,
+  };
+}
+
 module.exports = {
   processWorkflowTick,
   processAllWorkflowTicks,
   registerInboundMessageEvent,
   createDiagnosticoFromPayload,
+  startOutboundFromCommand,
 };
