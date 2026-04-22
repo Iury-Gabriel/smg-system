@@ -161,6 +161,37 @@ function mapFormularioPayload(form) {
   };
 }
 
+function mapWf2OperationalContext(lead = null) {
+  const wf2 =
+    lead?.dadosBrutos && typeof lead.dadosBrutos === "object" && lead.dadosBrutos.wf2
+      ? lead.dadosBrutos.wf2
+      : {};
+  const status = String(lead?.status || "").trim().toUpperCase();
+  const analysis = {
+    sent_at: textOrEmpty(wf2.analysisSentAt),
+    file_url: textOrEmpty(wf2.analysisFileUrl),
+    awaiting_read_confirmation: Boolean(wf2.analysisAwaitingReadConfirmation),
+    read_confirmed_at: textOrEmpty(wf2.analysisReadConfirmedAt),
+    delivery_step: textOrEmpty(wf2.analysisDeliveryStep),
+  };
+
+  let nextAction = "";
+  if (status === "FORMULARIO_RESPONDIDO") {
+    nextAction = "enviar_analise_pdf";
+  } else if (status === "ANALISE_ENVIADA" && analysis.awaiting_read_confirmation) {
+    nextAction = "confirmar_leitura_da_analise_sem_reapresentacao";
+  } else if (status === "ANALISE_ENVIADA") {
+    nextAction = "converter_para_diagnostico_com_2_horarios";
+  } else if (status === "DIAGNOSTICO_AGENDADO") {
+    nextAction = "confirmar_proximos_passos_pos_agendamento";
+  }
+
+  return {
+    analysis,
+    next_action: nextAction,
+  };
+}
+
 async function resolveHorarioValido({ prisma, workflow }) {
   try {
     if (!prisma?.configAutomacao?.findUnique) return true;
@@ -207,6 +238,7 @@ async function buildInboundPayloadContext({
   }
 
   const status = textOrEmpty(lead?.status || "NOVO_LEAD");
+  const wf2Context = mapWf2OperationalContext(lead);
   const payload = {
     lead: {
       status: status || "NOVO_LEAD",
@@ -215,6 +247,7 @@ async function buildInboundPayloadContext({
       nome: textOrEmpty(lead?.nome || "Lead"),
       empresa: textOrEmpty(lead?.empresa || "Empresa"),
     },
+    wf2_context: wf2Context,
     conversation: {
       history: historyPayload,
       history_truncated: historyTruncated,

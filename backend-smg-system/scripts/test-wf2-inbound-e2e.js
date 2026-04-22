@@ -294,6 +294,70 @@ async function run() {
       { status: leadAfterForm.status }
     );
 
+    console.log("[E2E] Iniciando cenario 1b (confirmacao de leitura da analise)...");    
+
+    const inboundReadAckResult = await sendInbound({
+      phone: phoneForm,
+      text: "consegui sim",
+      messageId: `e2e-form-read-${Date.now()}`,
+    });
+    const readAckEventResult = inboundReadAckResult?.results?.[0] || {};
+    assertOrThrow(
+      Boolean(inboundReadAckResult?.accepted),
+      "Webhook do cenario 1b nao foi aceito."
+    );
+    assertOrThrow(
+      readAckEventResult?.reason === "buffered",
+      "Cenario 1b nao entrou no fluxo buffered apos confirmar leitura da analise.",
+      readAckEventResult
+    );
+
+    await wait(10000);
+
+    const formRequestsAfterReadAck = filterOutboundRequests(mock.requests, phoneForm);
+    const formMediaAfterReadAck = formRequestsAfterReadAck.filter((item) =>
+      item.path.includes("/send/media")
+    );
+    assertOrThrow(
+      formMediaAfterReadAck.length === 1,
+      "Cenario 1b reenviou PDF da analise apos confirmacao de leitura.",
+      formRequestsAfterReadAck
+    );
+
+    const leadAfterReadAck = await tables.lead.findFirst({
+      where: {
+        telefone: {
+          in: [normalizeDigits(phoneForm), `+${normalizeDigits(phoneForm)}`],
+        },
+      },
+      orderBy: { criadoEm: "desc" },
+    });
+    const wf2AfterReadAck =
+      leadAfterReadAck?.dadosBrutos &&
+      typeof leadAfterReadAck.dadosBrutos === "object" &&
+      !Array.isArray(leadAfterReadAck.dadosBrutos)
+        ? leadAfterReadAck.dadosBrutos.wf2 || {}
+        : {};
+
+    assertOrThrow(leadAfterReadAck, "Lead do cenario 1b nao encontrado.");
+    assertOrThrow(
+      String(leadAfterReadAck.status || "").toUpperCase() === "ANALISE_ENVIADA",
+      "Cenario 1b alterou status do lead de forma inesperada.",
+      { status: leadAfterReadAck.status }
+    );
+    assertOrThrow(
+      wf2AfterReadAck.analysisAwaitingReadConfirmation === false,
+      "Cenario 1b nao marcou confirmacao de leitura da analise no contexto WF2.",
+      wf2AfterReadAck
+    );
+    assertOrThrow(
+      Boolean(wf2AfterReadAck.analysisReadConfirmedAt),
+      "Cenario 1b nao registrou timestamp de confirmacao de leitura.",
+      wf2AfterReadAck
+    );
+
+    console.log("[E2E] Cenario 1b OK.");
+
     console.log("[E2E] Cenario 1 OK.");
 
     console.log("[E2E] Iniciando cenario 2 (sem formulario -> resposta via IA)...");

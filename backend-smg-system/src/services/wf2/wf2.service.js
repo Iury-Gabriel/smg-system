@@ -472,6 +472,26 @@ function followupRequestsReadConfirmation(followupText) {
   return hasPdfOrAnalysis && hasReadCheck;
 }
 
+function normalizeIntentText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function isAnalysisReadConfirmedMessage(messageText = "") {
+  const text = normalizeIntentText(messageText);
+  if (!text) return false;
+  if (/\b(nao|nao consegui|nao abriu|nao abriu|nao recebi|erro|falhou)\b/.test(text)) {
+    return false;
+  }
+  if (/^(sim|yes|ok|blz|beleza|deu certo|consegui|abri|abriu|recebi)\b/.test(text)) {
+    return true;
+  }
+  return /\b(consegui|abri|abriu|recebi|deu certo)\b/.test(text);
+}
+
 function introContainsQualificationQuestion(introText) {
   const raw = textOrEmpty(introText).toLowerCase();
   if (!raw) return false;
@@ -866,6 +886,10 @@ async function processAnalysisForLead({
           wf2: {
             analysisSentAt: now.toISOString(),
             analysisFileUrl: file.publicUrl,
+            analysisAwaitingReadConfirmation: true,
+            analysisReadConfirmedAt: null,
+            analysisDeliveryStep: "awaiting_read_confirmation",
+            analysisDeliveryCycleId: `${now.getTime()}-${currentLead.id.slice(0, 8)}`,
           },
         }),
       },
@@ -1498,6 +1522,53 @@ async function registerInboundMessageEvent({
         previousStatus: String(updatedLead.status || "").toUpperCase(),
         diagnosticoFormularioId: textOrEmpty(leadForNextStep.diagnosticoFormularioId) || null,
       },
+    });
+  }
+
+  const waitingAnalysisReadConfirmation = Boolean(
+    leadForNextStep?.dadosBrutos?.wf2?.analysisAwaitingReadConfirmation
+  );
+  const analysisReadConfirmedNow =
+    normalizedStatus === "ANALISE_ENVIADA" &&
+    waitingAnalysisReadConfirmation &&
+    isAnalysisReadConfirmedMessage(messageText);
+
+  if (analysisReadConfirmedNow) {
+    const confirmedAt = new Date().toISOString();
+    leadForNextStep = await tables.lead.update({
+      where: { id: leadForNextStep.id },
+      data: {
+        dadosBrutos: mergeDadosBrutos(leadForNextStep.dadosBrutos, {
+          wf2: {
+            analysisAwaitingReadConfirmation: false,
+            analysisReadConfirmedAt: confirmedAt,
+            analysisDeliveryStep: "read_confirmed",
+          },
+        }),
+      },
+    });
+    normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: leadForNextStep.id,
+      tipo: "analise_leitura_confirmada",
+      etapa: "etapa7",
+      direcao: "inbound",
+      mensagem: "Lead confirmou que conseguiu abrir a Analise de Maturidade.",
+      metadata: {
+        inboundText: clipText(messageText, 240),
+        confirmedAt,
+      },
+    });
+
+    logWf2("info", "inbound.message.analysis_read_confirmed", {
+      explanation:
+        "Confirmacao de leitura da analise registrada no contexto WF2 para orientar o proximo passo da IA.",
+      workflow,
+      leadId: leadForNextStep.id,
+      status: normalizedStatus,
+      confirmedAt,
     });
   }
 

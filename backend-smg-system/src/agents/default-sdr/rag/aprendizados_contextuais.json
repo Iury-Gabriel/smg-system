@@ -19,5 +19,12 @@
     "padrao": "Quando o lead demonstrar abertura para avancar, oferecer dois horarios concretos na mesma mensagem usando 'ou' e finalizar com pergunta fechada de escolha.",
     "origem": "base_clara",
     "tags": ["agendamento", "cta_fechado", "dois_horarios"]
+  },
+  {
+    "segmento": "all",
+    "etapa": "ANALISE_ENVIADA",
+    "padrao": "Se o lead acabou de confirmar que abriu a analise, nao se reapresente e nao reinicie a conversa; continue direto com 1 insight da analise e 1 pergunta curta.",
+    "origem": "base_clara",
+    "tags": ["continuidade", "sem_reapresentacao", "analise"]
   }
 ]
