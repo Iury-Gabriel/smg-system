@@ -62,6 +62,14 @@ function promptJson(value, max = 5000) {
   }
 }
 
+function isClearMemoryCommand(value = "") {
+  const normalized = textOrEmpty(value).trim().toLowerCase();
+  if (!normalized) return false;
+
+  const firstToken = normalized.split(/\s+/)[0]?.replace(/[.,;:!?]+$/g, "") || "";
+  return firstToken === "/clear";
+}
+
 function resolveEtapaAtualFromStatus(statusInput = "") {
   const status = String(statusInput || "").trim().toUpperCase();
   const mapping = {
@@ -1232,6 +1240,39 @@ async function queueInboundForOrchestrator({
     },
   });
 
+  if (aiConfig.clearMemoryCommandEnabled && isClearMemoryCommand(text)) {
+    const clearResult = await clearConversationAndPendingBuffer({
+      agent,
+      provider: inboundProvider,
+      conversationKey,
+      timerKey,
+      bufferKey,
+      destination: senderNumber,
+    });
+
+    await logExecutionEvent(workflow, runId, {
+      stepKey: "memory_cleared",
+      title: "Memoria de conversa limpa",
+      nodeType: "process",
+      status: "success",
+      payload: {
+        command: "/clear",
+        messagesDeleted: Number(clearResult?.messagesDeleted || 0),
+        sessionsReset: Number(clearResult?.sessionsReset || 0),
+      },
+    });
+
+    return {
+      handled: true,
+      ignored: false,
+      reason: "memory_cleared",
+      buffered: false,
+      cleared: true,
+      clearResult,
+      conversationKey,
+    };
+  }
+
   if (agent?.wf2?.enabled) {
     const wf2Result = await registerInboundMessageEvent({
       agentSlug: agent.slug,
@@ -1297,39 +1338,6 @@ async function queueInboundForOrchestrator({
         conversationKey,
       };
     }
-  }
-
-  const normalizedText = text.toLowerCase();
-  if (aiConfig.clearMemoryCommandEnabled && normalizedText === "/clear") {
-    const clearResult = await clearConversationAndPendingBuffer({
-      agent,
-      provider: inboundProvider,
-      conversationKey,
-      timerKey,
-      bufferKey,
-      destination: senderNumber,
-    });
-
-    await logExecutionEvent(workflow, runId, {
-      stepKey: "memory_cleared",
-      title: "Memoria de conversa limpa",
-      nodeType: "process",
-      status: "success",
-      payload: {
-        messagesDeleted: Number(clearResult?.messagesDeleted || 0),
-        sessionsReset: Number(clearResult?.sessionsReset || 0),
-      },
-    });
-
-    return {
-      handled: true,
-      ignored: false,
-      reason: "memory_cleared",
-      buffered: false,
-      cleared: true,
-      clearResult,
-      conversationKey,
-    };
   }
 
   const session = await getConversationSession({
