@@ -403,56 +403,217 @@ function normalizeDeliveryText(value, max = 320) {
   return normalized.length > max ? normalized.slice(0, max) : normalized;
 }
 
-async function generateAnalysisDeliveryMessages({ lead, form }) {
+function formatDiagnosisSlot(date, hour, minute = 0, timezone = "America/Sao_Paulo") {
+  const base = new Date(date.getTime());
+  base.setHours(hour, minute, 0, 0);
+
+  const weekdayLabel = new Intl.DateTimeFormat("pt-BR", {
+    weekday: "short",
+    timeZone: timezone,
+  })
+    .format(base)
+    .replace(".", "")
+    .trim();
+
+  const dayMonth = new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: timezone,
+  }).format(base);
+
+  return `${weekdayLabel} (${dayMonth}) às ${String(hour).padStart(2, "0")}h`;
+}
+
+function nextBusinessDay(fromDate, addBusinessDays = 1) {
+  const current = new Date(fromDate.getTime());
+  current.setHours(12, 0, 0, 0);
+
+  let count = 0;
+  while (count < addBusinessDays) {
+    current.setDate(current.getDate() + 1);
+    const weekday = current.getDay();
+    if (weekday !== 0 && weekday !== 6) {
+      count += 1;
+    }
+  }
+  return current;
+}
+
+function buildDiagnosisSlotOptions(now = new Date()) {
+  const firstDay = nextBusinessDay(now, 1);
+  const secondDay = nextBusinessDay(now, 2);
+  return {
+    slot1: formatDiagnosisSlot(firstDay, 15, 0),
+    slot2: formatDiagnosisSlot(secondDay, 10, 0),
+  };
+}
+
+function followupContainsTwoSlots(followupText) {
+  const raw = textOrEmpty(followupText);
+  if (!raw) return false;
+  const hasOu = /\bou\b/i.test(raw);
+  const hourMatchesWithH =
+    raw.match(/\b([01]?\d|2[0-3])(?::[0-5]\d)?\s*h\b/gi) || [];
+  const hourMatchesCompact = raw.match(/\b([01]?\d|2[0-3])h[0-5]\d\b/gi) || [];
+  const hourMatchesColon = raw.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/gi) || [];
+  const totalSlots =
+    hourMatchesWithH.length + hourMatchesCompact.length + hourMatchesColon.length;
+  return hasOu && totalSlots >= 2;
+}
+
+function introContainsQualificationQuestion(introText) {
+  const raw = textOrEmpty(introText).toLowerCase();
+  if (!raw) return false;
+  return (
+    /\b(qual|quais|poderia|pode|me conta|me dizer)\b/.test(raw) &&
+    /\b(desafio|gargalo|dor|problema|situacao|situação)\b/.test(raw)
+  );
+}
+
+function introLooksGenericFormConfirmation(introText) {
+  const raw = textOrEmpty(introText).toLowerCase();
+  if (!raw) return false;
+  return (
+    /recebi\s+a?\s*confirmacao/.test(raw) ||
+    /vi que voce preencheu o formulario/.test(raw) ||
+    /preencheu o formulario\.?\s*agora/.test(raw)
+  );
+}
+
+async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
+  const { slot1, slot2 } = buildDiagnosisSlotOptions(new Date());
   const fallbackIntro = `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua An\u00e1lise de Maturidade em PDF para voc\u00ea revisar com calma.`;
-  const fallbackFollowup =
-    "Acabei de te enviar a An\u00e1lise de Maturidade em PDF. Se fizer sentido para voc\u00ea, j\u00e1 podemos alinhar o diagn\u00f3stico guiado.";
+  const fallbackFollowup = `Acabei de te enviar a An\u00e1lise de Maturidade em PDF. Se fizer sentido para voc\u00ea, posso te sugerir dois hor\u00e1rios para o diagn\u00f3stico guiado: ${slot1} ou ${slot2}. Qual funciona melhor?`;
 
   const contextSegment = textOrEmpty(form?.segmento || lead?.segmento || "outro");
   const contextChallenge = textOrEmpty(form?.maiorDesafio || "");
   const contextUrgency = textOrEmpty(form?.urgencia || "");
 
+  const systemPrompt = [
+    "Voce escreve mensagens curtas para WhatsApp comercial em pt-BR.",
+    "Tom consultivo, natural e humano.",
+    "Nunca use markdown, lista, aspas extras ou emoji.",
+    "Sempre use acentuacao correta em portugues.",
+    "Retorne SOMENTE JSON valido.",
+  ].join("\n");
+
+  const baseUserPrompt = [
+    "Gere duas mensagens para envio da Analise de Maturidade da SMG.",
+    'Formato exato de saida: {"introText":"...","followupText":"..."}',
+    "Regras:",
+    "- introText: apresentar-se como Clara da SMG e avisar que vai enviar o PDF agora.",
+    "- introText: incluir 1 detalhe concreto do formulario (segmento, desafio ou urgencia), sem inventar.",
+    "- introText: nao fazer pergunta de qualificacao e nao pedir novamente o desafio do lead.",
+    '- introText: evite texto generico como "recebi a confirmacao que voce preencheu o formulario".',
+    "- followupText: apos o envio, confirmar o envio do PDF e convidar para diagnostico guiado.",
+    "- followupText: mencionar em 1 frase curta um ponto da analise conectado ao desafio do lead.",
+    "- followupText deve terminar com uma pergunta fechada com duas opcoes reais de horario.",
+    '- Use "ou" entre os dois horarios e finalize com "Qual funciona melhor?".',
+    "- Evite placeholders como [horario], [data] ou <...>.",
+    `- Como referencia de agenda, voce pode usar algo como "${slot1}" e "${slot2}", mas nao e obrigatorio repetir exatamente esses horarios.`,
+    "- Cada campo com no maximo 320 caracteres.",
+    "- Nao repetir frases identicas de templates fixos.",
+    "- Linguagem clara e objetiva.",
+    "",
+    `Contexto do lead: nome=${lead?.nome || "-"}, empresa=${lead?.empresa || "-"}, segmento=${contextSegment}.`,
+    `Maior desafio declarado=${contextChallenge || "-"}.`,
+    `Urgencia=${contextUrgency || "-"}.`,
+  ].join("\n");
+
+  const fallbackJson = JSON.stringify({
+    introText: fallbackIntro,
+    followupText: fallbackFollowup,
+  });
+
   const aiResult = await generateAiReply({
-    systemPrompt: [
-      "Voce escreve mensagens curtas para WhatsApp comercial em pt-BR.",
-      "Tom consultivo, natural e humano.",
-      "Nunca use markdown, lista, aspas extras ou emoji.",
-      "Sempre use acentuacao correta em portugues.",
-      "Retorne SOMENTE JSON valido.",
-    ].join("\n"),
-    userPrompt: [
-      "Gere duas mensagens para envio da Analise de Maturidade da SMG.",
-      'Formato exato de saida: {"introText":"...","followupText":"..."}',
-      "Regras:",
-      "- introText: apresentar-se como Clara da SMG e avisar que vai enviar o PDF agora.",
-      "- followupText: apos o envio, confirmar o envio do PDF e convidar para diagnostico guiado.",
-      "- Cada campo com no maximo 320 caracteres.",
-      "- Nao repetir frases identicas de templates fixos.",
-      "- Linguagem clara e objetiva.",
-      "",
-      `Contexto do lead: nome=${lead?.nome || "-"}, empresa=${lead?.empresa || "-"}, segmento=${contextSegment}.`,
-      `Maior desafio declarado=${contextChallenge || "-"}.`,
-      `Urgencia=${contextUrgency || "-"}.`,
-    ].join("\n"),
-    fallbackReply: JSON.stringify({
-      introText: fallbackIntro,
-      followupText: fallbackFollowup,
-    }),
+    systemPrompt,
+    userPrompt: baseUserPrompt,
+    fallbackReply: fallbackJson,
     useLangChain: false,
     allowEnvFallback: true,
     model: env.openaiModel || "gpt-4o-mini",
     apiKey: env.openaiApiKey || "",
   });
 
-  const parsed = parseJsonObjectFromText(aiResult.text);
-  const introText = normalizeDeliveryText(parsed?.introText);
-  const followupText = normalizeDeliveryText(parsed?.followupText);
+  let parsed = parseJsonObjectFromText(aiResult.text);
+  let introText = normalizeDeliveryText(parsed?.introText);
+  let followupText = normalizeDeliveryText(parsed?.followupText);
+  let followupWithSlots = followupContainsTwoSlots(followupText);
+  let introHasQualificationQuestion = introContainsQualificationQuestion(introText);
+  let introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
+  let repairResult = null;
+
+  if (
+    !introText ||
+    !followupWithSlots ||
+    introHasQualificationQuestion ||
+    introGenericFormConfirmation
+  ) {
+    repairResult = await generateAiReply({
+      systemPrompt,
+      userPrompt: [
+        "Corrija o JSON abaixo para cumprir todas as regras.",
+        'Formato exato de saida: {"introText":"...","followupText":"..."}',
+        `JSON atual: ${JSON.stringify({
+          introText: introText || "",
+          followupText: followupText || "",
+        })}`,
+        "Problemas detectados:",
+        `- introText valido: ${introText ? "sim" : "nao"}`,
+        `- introText sem pergunta de qualificacao: ${
+          introHasQualificationQuestion ? "nao" : "sim"
+        }`,
+        `- introText sem confirmacao generica de formulario: ${
+          introGenericFormConfirmation ? "nao" : "sim"
+        }`,
+        `- followupText com duas opcoes de horario + "ou": ${
+          followupWithSlots ? "sim" : "nao"
+        }`,
+        "Mantenha o tom natural, use acentuacao correta e sem markdown.",
+      ].join("\n"),
+      fallbackReply: fallbackJson,
+      useLangChain: false,
+      allowEnvFallback: true,
+      model: env.openaiModel || "gpt-4o-mini",
+      apiKey: env.openaiApiKey || "",
+    });
+
+    parsed = parseJsonObjectFromText(repairResult.text);
+    introText = normalizeDeliveryText(parsed?.introText);
+    followupText = normalizeDeliveryText(parsed?.followupText);
+    followupWithSlots = followupContainsTwoSlots(followupText);
+    introHasQualificationQuestion = introContainsQualificationQuestion(introText);
+    introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
+  }
+
+  const introValid =
+    Boolean(introText) && !introHasQualificationQuestion && !introGenericFormConfirmation;
+  const finalIntroText = introValid ? introText : fallbackIntro;
+  const finalFollowupText = followupWithSlots ? followupText : fallbackFollowup;
+  const usedHardFallback =
+    finalIntroText === fallbackIntro || finalFollowupText === fallbackFollowup;
+
+  logWf2("info", "analysis.delivery_copy.validation", {
+    explanation:
+      "Validacao final do copy de entrega da analise com prioridade para texto gerado pela IA.",
+    workflow,
+    leadId: lead?.id || null,
+    hadRepairPass: Boolean(repairResult),
+    introGenerated: introValid,
+    introHasQualificationQuestion,
+    introGenericFormConfirmation,
+    followupHasTwoSlots: Boolean(followupWithSlots),
+    usedHardFallback,
+  });
 
   return {
-    introText: introText || fallbackIntro,
-    followupText: followupText || fallbackFollowup,
-    usedFallback: Boolean(aiResult?.usedFallback) || !introText || !followupText,
-    model: aiResult?.model || null,
+    introText: finalIntroText,
+    followupText: finalFollowupText,
+    usedFallback:
+      Boolean(aiResult?.usedFallback) || Boolean(repairResult?.usedFallback) || usedHardFallback,
+    model: repairResult?.model || aiResult?.model || null,
+    hadRepairPass: Boolean(repairResult),
+    usedHardFallback,
   };
 }
 
@@ -541,8 +702,9 @@ async function processAnalysisForLead({
 
   const userPrompt = buildAnalysisPrompt(form, lead);
   const aiResult = await generateAiReply({
-    systemPrompt:
+    systemPrompt: [
       "Voce cria analises de maturidade operacional profundas e praticas para PMEs no Brasil.",
+    ].join("\n"),
     userPrompt,
     fallbackReply:
       "Analise preliminar: existem oportunidades de melhoria em processos, uso de dados e governanca operacional. Recomendamos diagnostico aprofundado para plano de implementacao.",
@@ -568,7 +730,7 @@ async function processAnalysisForLead({
     );
   }
 
-  const deliveryCopy = await generateAnalysisDeliveryMessages({ lead, form });
+  const deliveryCopy = await generateAnalysisDeliveryMessages({ workflow, lead, form });
   logWf2("info", "analysis.delivery_copy.generated", {
     explanation:
       "Mensagens de introducao/follow-up da analise geradas por IA para envio no WhatsApp.",
@@ -576,6 +738,8 @@ async function processAnalysisForLead({
     leadId: lead?.id || null,
     model: deliveryCopy.model,
     usedFallback: Boolean(deliveryCopy.usedFallback),
+    hadRepairPass: Boolean(deliveryCopy.hadRepairPass),
+    usedHardFallback: Boolean(deliveryCopy.usedHardFallback),
     introPreview: textOrEmpty(deliveryCopy.introText).slice(0, 200),
     followupPreview: textOrEmpty(deliveryCopy.followupText).slice(0, 200),
   });

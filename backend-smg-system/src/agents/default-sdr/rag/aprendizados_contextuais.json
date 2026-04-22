@@ -9,9 +9,15 @@
   {
     "segmento": "all",
     "etapa": "FORMULARIO_RESPONDIDO",
-    "padrao": "Apos formulario respondido, contextualizar o principal desafio declarado pelo lead antes de propor proximo passo para diagnostico.",
+    "padrao": "Apos formulario respondido, apresente-se, avise envio da Analise de Maturidade em PDF e contextualize com 1 dado do formulario. Nao pedir novamente o principal desafio.",
     "origem": "base_clara",
-    "tags": ["analise", "contexto_formulario"]
+    "tags": ["analise", "contexto_formulario", "sem_requalificar"]
+  },
+  {
+    "segmento": "all",
+    "etapa": "ANALISE_ENVIADA",
+    "padrao": "Quando o lead demonstrar abertura para avancar, oferecer dois horarios concretos na mesma mensagem usando 'ou' e finalizar com pergunta fechada de escolha.",
+    "origem": "base_clara",
+    "tags": ["agendamento", "cta_fechado", "dois_horarios"]
   }
 ]
-

@@ -57,6 +57,14 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function countHourOptions(text) {
+  const raw = String(text || "");
+  const withH = raw.match(/\b([01]?\d|2[0-3])(?::[0-5]\d)?\s*h\b/gi) || [];
+  const compact = raw.match(/\b([01]?\d|2[0-3])h[0-5]\d\b/gi) || [];
+  const colon = raw.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/gi) || [];
+  return withH.length + compact.length + colon.length;
+}
+
 function readJsonSafe(raw) {
   try {
     return JSON.parse(raw || "{}");
@@ -261,6 +269,14 @@ async function run() {
     assertOrThrow(
       formTexts.some((text) => /diagn[o\u00f3]stico/i.test(text)),
       "Cenario 1 nao enviou texto convidando para diagnostico.",
+      formTexts
+    );
+    const textWithTwoSlots = formTexts.find((text) => {
+      return countHourOptions(text) >= 2 && /\bou\b/i.test(String(text));
+    });
+    assertOrThrow(
+      Boolean(textWithTwoSlots),
+      "Cenario 1 nao trouxe duas opcoes de horario no CTA de diagnostico.",
       formTexts
     );
 
