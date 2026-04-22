@@ -105,10 +105,16 @@ async function pushBufferedMessage(bufferKey, messagePayload, ttlSeconds = 90) {
   const existing = inMemoryBuffers.get(bufferKey) || [];
   existing.push(encoded);
   inMemoryBuffers.set(bufferKey, existing);
+  logRedis("warn", "push.fallback_memory", {
+    bufferKey,
+    ttlSeconds,
+    bufferedCount: existing.length,
+  });
 }
 
 async function popAllBufferedMessages(bufferKey) {
   const redis = getRedisClient();
+  let redisRows = [];
 
   if (redis) {
     try {
@@ -116,16 +122,7 @@ async function popAllBufferedMessages(bufferKey) {
       transaction.lrange(bufferKey, 0, -1);
       transaction.del(bufferKey);
       const results = await transaction.exec();
-      const rows = results?.[0]?.[1] || [];
-      return rows
-        .map((row) => {
-          try {
-            return JSON.parse(row);
-          } catch (_error) {
-            return null;
-          }
-        })
-        .filter(Boolean);
+      redisRows = Array.isArray(results?.[0]?.[1]) ? results[0][1] : [];
     } catch (error) {
       logRedis("error", "pop.failed", {
         bufferKey,
@@ -135,9 +132,13 @@ async function popAllBufferedMessages(bufferKey) {
     }
   }
 
-  const rows = inMemoryBuffers.get(bufferKey) || [];
+  const memoryRows = inMemoryBuffers.get(bufferKey) || [];
   inMemoryBuffers.delete(bufferKey);
-  return rows
+
+  const mergedRows = [...redisRows, ...memoryRows];
+  const uniqueRows = [...new Set(mergedRows)];
+
+  return uniqueRows
     .map((row) => {
       try {
         return JSON.parse(row);

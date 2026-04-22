@@ -1160,6 +1160,7 @@ async function clearConversationAndPendingBuffer({
 }) {
   const prisma = getPrismaForAgent(agent);
   const workflow = getAgentWorkflow(agent);
+  const tables = getWorkflowTables(prisma, workflow);
 
   const existingTimer = bufferTimers.get(timerKey);
   if (existingTimer) {
@@ -1175,14 +1176,120 @@ async function clearConversationAndPendingBuffer({
     conversationKey,
   });
 
+  const lead = await findLeadForInboundContext({
+    tables,
+    senderNumber: normalizeE164(destination) || destination,
+    agentSlug: agent.slug,
+  });
+
+  let leadReset = {
+    foundLead: false,
+    leadId: null,
+    status: null,
+    timelineDeleted: 0,
+    crmDeleted: 0,
+    analysesDeleted: 0,
+  };
+
+  if (lead) {
+    const keepFormId = textOrEmpty(lead.diagnosticoFormularioId) || null;
+    const keepFormFilled = Boolean(lead.formularioPreenchido || keepFormId);
+    const rawData =
+      lead.dadosBrutos && typeof lead.dadosBrutos === "object" && !Array.isArray(lead.dadosBrutos)
+        ? lead.dadosBrutos
+        : {};
+    const { wf2: _wf2, ...rawWithoutWf2 } = rawData;
+    const resetAt = new Date().toISOString();
+
+    const transactionResult = await prisma.$transaction(async (tx) => {
+      const txTables = getWorkflowTables(tx, workflow);
+      const timelineDelete = await tx.leadAutomacaoTimeline.deleteMany({
+        where: {
+          workflow,
+          leadId: lead.id,
+        },
+      });
+      const crmDelete = await tx.leadCrm.deleteMany({
+        where: {
+          workflow,
+          leadId: lead.id,
+        },
+      });
+      const analysisDelete = await tx.analiseMaturidade.deleteMany({
+        where: {
+          workflow,
+          leadId: lead.id,
+        },
+      });
+      const updatedLead = await txTables.lead.update({
+        where: { id: lead.id },
+        data: {
+          status: "NOVO_LEAD",
+          automationActive: true,
+          formularioPreenchido: keepFormFilled,
+          diagnosticoFormularioId: keepFormId,
+          ultimaInteracao: new Date(),
+          ultimoEnvioIa: null,
+          proximoFollowupEm: null,
+          followupNivel: 0,
+          dadosBrutos: {
+            ...rawWithoutWf2,
+            wf2: {
+              resetByClearCommand: true,
+              resetAt,
+              previousStatus: String(lead.status || "").trim() || null,
+              keptFormularioId: keepFormId,
+            },
+          },
+        },
+      });
+      await tx.leadAutomacaoTimeline.create({
+        data: {
+          workflow,
+          leadId: lead.id,
+          tipo: "clear_reset",
+          etapa: "system",
+          direcao: "system",
+          mensagem: "Lead resetado via comando /clear.",
+          metadata: {
+            keptFormularioId: keepFormId,
+            previousStatus: String(lead.status || "").trim() || null,
+            timelineDeleted: Number(timelineDelete?.count || 0),
+            crmDeleted: Number(crmDelete?.count || 0),
+            analysesDeleted: Number(analysisDelete?.count || 0),
+          },
+        },
+      });
+
+      return {
+        updatedLead,
+        timelineDeleted: Number(timelineDelete?.count || 0),
+        crmDeleted: Number(crmDelete?.count || 0),
+        analysesDeleted: Number(analysisDelete?.count || 0),
+      };
+    });
+
+    leadReset = {
+      foundLead: true,
+      leadId: transactionResult?.updatedLead?.id || lead.id,
+      status: transactionResult?.updatedLead?.status || "NOVO_LEAD",
+      timelineDeleted: Number(transactionResult?.timelineDeleted || 0),
+      crmDeleted: Number(transactionResult?.crmDeleted || 0),
+      analysesDeleted: Number(transactionResult?.analysesDeleted || 0),
+    };
+  }
+
   await sendTextByProvider({
     agent,
     provider,
     to: destination,
-    text: "Memoria da conversa limpa com sucesso. Podemos comecar novamente.",
+    text: "Pronto. Limpei o historico, removi o contexto de diagnostico e reiniciei seu lead. O formulario foi mantido.",
   });
 
-  return clearResult;
+  return {
+    ...clearResult,
+    leadReset,
+  };
 }
 
 async function queueInboundForOrchestrator({
@@ -1266,6 +1373,14 @@ async function queueInboundForOrchestrator({
         command: "/clear",
         messagesDeleted: Number(clearResult?.messagesDeleted || 0),
         sessionsReset: Number(clearResult?.sessionsReset || 0),
+        leadReset: {
+          foundLead: Boolean(clearResult?.leadReset?.foundLead),
+          leadId: clearResult?.leadReset?.leadId || null,
+          status: clearResult?.leadReset?.status || null,
+          timelineDeleted: Number(clearResult?.leadReset?.timelineDeleted || 0),
+          crmDeleted: Number(clearResult?.leadReset?.crmDeleted || 0),
+          analysesDeleted: Number(clearResult?.leadReset?.analysesDeleted || 0),
+        },
       },
     });
 
