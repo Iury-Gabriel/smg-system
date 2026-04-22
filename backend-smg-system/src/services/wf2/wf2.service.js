@@ -35,6 +35,7 @@ const ANALYSIS_SEQUENCE_DELAY_MS = Math.max(
   0,
   Number(process.env.WF2_ANALYSIS_SEQUENCE_DELAY_MS || 2500)
 );
+const analysisInFlightLocks = new Set();
 const OPT_OUT_REGEX = /\b(parar|sair|remover|nao quero|não quero|stop|cancelar|opt[\s-]?out)\b/i;
 
 function logWf2(level, event, payload = {}) {
@@ -461,6 +462,16 @@ function followupContainsTwoSlots(followupText) {
   return hasOu && totalSlots >= 2;
 }
 
+function followupRequestsReadConfirmation(followupText) {
+  const raw = textOrEmpty(followupText);
+  if (!raw) return false;
+  const hasPdfOrAnalysis = /\b(pdf|analise|an[aá]lise)\b/i.test(raw);
+  const hasReadCheck =
+    /\b(conseguiu|consegue|pode|poderia|recebeu|abriu|abrir|acessar|acessou)\b/i.test(raw) &&
+    /\?/.test(raw);
+  return hasPdfOrAnalysis && hasReadCheck;
+}
+
 function introContainsQualificationQuestion(introText) {
   const raw = textOrEmpty(introText).toLowerCase();
   if (!raw) return false;
@@ -481,9 +492,9 @@ function introLooksGenericFormConfirmation(introText) {
 }
 
 async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
-  const { slot1, slot2 } = buildDiagnosisSlotOptions(new Date());
   const fallbackIntro = `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua An\u00e1lise de Maturidade em PDF para voc\u00ea revisar com calma.`;
-  const fallbackFollowup = `Acabei de te enviar a An\u00e1lise de Maturidade em PDF. Se fizer sentido para voc\u00ea, posso te sugerir dois hor\u00e1rios para o diagn\u00f3stico guiado: ${slot1} ou ${slot2}. Qual funciona melhor?`;
+  const fallbackFollowup =
+    "Te enviei a An\u00e1lise de Maturidade em PDF. Conseguiu abrir o arquivo para eu te explicar os principais pontos?";
 
   const contextSegment = textOrEmpty(form?.segmento || lead?.segmento || "outro");
   const contextChallenge = textOrEmpty(form?.maiorDesafio || "");
@@ -505,12 +516,11 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
     "- introText: incluir 1 detalhe concreto do formulario (segmento, desafio ou urgencia), sem inventar.",
     "- introText: nao fazer pergunta de qualificacao e nao pedir novamente o desafio do lead.",
     '- introText: evite texto generico como "recebi a confirmacao que voce preencheu o formulario".',
-    "- followupText: apos o envio, confirmar o envio do PDF e convidar para diagnostico guiado.",
-    "- followupText: mencionar em 1 frase curta um ponto da analise conectado ao desafio do lead.",
-    "- followupText deve terminar com uma pergunta fechada com duas opcoes reais de horario.",
-    '- Use "ou" entre os dois horarios e finalize com "Qual funciona melhor?".',
+    "- followupText: apos o envio, confirmar o envio do PDF e pedir confirmacao de leitura.",
+    "- followupText: fazer apenas 1 pergunta objetiva de leitura do material (ex: conseguiu abrir?).",
+    "- followupText: nao sugerir horario de diagnostico antes da resposta do lead sobre a analise.",
+    "- followupText: nao convidar para agendamento nesta mensagem.",
     "- Evite placeholders como [horario], [data] ou <...>.",
-    `- Como referencia de agenda, voce pode usar algo como "${slot1}" e "${slot2}", mas nao e obrigatorio repetir exatamente esses horarios.`,
     "- Cada campo com no maximo 320 caracteres.",
     "- Nao repetir frases identicas de templates fixos.",
     "- Linguagem clara e objetiva.",
@@ -538,14 +548,14 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
   let parsed = parseJsonObjectFromText(aiResult.text);
   let introText = normalizeDeliveryText(parsed?.introText);
   let followupText = normalizeDeliveryText(parsed?.followupText);
-  let followupWithSlots = followupContainsTwoSlots(followupText);
+  let followupAsksReadConfirmation = followupRequestsReadConfirmation(followupText);
   let introHasQualificationQuestion = introContainsQualificationQuestion(introText);
   let introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
   let repairResult = null;
 
   if (
     !introText ||
-    !followupWithSlots ||
+    !followupAsksReadConfirmation ||
     introHasQualificationQuestion ||
     introGenericFormConfirmation
   ) {
@@ -566,8 +576,8 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
         `- introText sem confirmacao generica de formulario: ${
           introGenericFormConfirmation ? "nao" : "sim"
         }`,
-        `- followupText com duas opcoes de horario + "ou": ${
-          followupWithSlots ? "sim" : "nao"
+        `- followupText pedindo confirmacao de leitura da analise: ${
+          followupAsksReadConfirmation ? "sim" : "nao"
         }`,
         "Mantenha o tom natural, use acentuacao correta e sem markdown.",
       ].join("\n"),
@@ -581,7 +591,7 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
     parsed = parseJsonObjectFromText(repairResult.text);
     introText = normalizeDeliveryText(parsed?.introText);
     followupText = normalizeDeliveryText(parsed?.followupText);
-    followupWithSlots = followupContainsTwoSlots(followupText);
+    followupAsksReadConfirmation = followupRequestsReadConfirmation(followupText);
     introHasQualificationQuestion = introContainsQualificationQuestion(introText);
     introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
   }
@@ -589,7 +599,7 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
   const introValid =
     Boolean(introText) && !introHasQualificationQuestion && !introGenericFormConfirmation;
   const finalIntroText = introValid ? introText : fallbackIntro;
-  const finalFollowupText = followupWithSlots ? followupText : fallbackFollowup;
+  const finalFollowupText = followupAsksReadConfirmation ? followupText : fallbackFollowup;
   const usedHardFallback =
     finalIntroText === fallbackIntro || finalFollowupText === fallbackFollowup;
 
@@ -602,7 +612,7 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
     introGenerated: introValid,
     introHasQualificationQuestion,
     introGenericFormConfirmation,
-    followupHasTwoSlots: Boolean(followupWithSlots),
+    followupAsksReadConfirmation: Boolean(followupAsksReadConfirmation),
     usedHardFallback,
   });
 
@@ -636,198 +646,263 @@ async function processAnalysisForLead({
     return { processed: false, reason: "outbound_disabled" };
   }
 
-  if (!lead?.automationActive) {
-    logWf2("warn", "analysis.skip.automation_inactive", {
-      explanation: "Tentativa de gerar/enviar analise ignorada: automacao inativa.",
-      workflow,
-      leadId: lead?.id || null,
-      leadStatus: String(lead?.status || "").toUpperCase() || null,
-    });
-    return { processed: false, reason: "automation_inactive" };
-  }
-  if (String(lead.status || "").toUpperCase() !== "FORMULARIO_RESPONDIDO") {
-    logWf2("warn", "analysis.skip.status_not_ready", {
-      explanation:
-        "Tentativa de gerar/enviar analise ignorada: status diferente de FORMULARIO_RESPONDIDO.",
-      workflow,
-      leadId: lead?.id || null,
-      leadStatus: String(lead?.status || "").toUpperCase() || null,
-    });
-    return { processed: false, reason: "status_not_ready" };
+  if (!lead?.id) {
+    return { processed: false, reason: "lead_not_found" };
   }
 
-  const formId = textOrEmpty(lead.diagnosticoFormularioId);
-  if (!formId) {
+  const lockKey = `${workflow}:${lead.id}`;
+  if (analysisInFlightLocks.has(lockKey)) {
+    logWf2("warn", "analysis.skip.in_flight", {
+      explanation:
+        "Tentativa ignorada para evitar envio duplicado da analise enquanto outra execucao ainda esta em andamento.",
+      workflow,
+      leadId: lead.id,
+    });
+    return { processed: false, reason: "analysis_in_flight" };
+  }
+
+  analysisInFlightLocks.add(lockKey);
+  try {
+    const currentLead = await tables.lead.findUnique({
+      where: { id: lead.id },
+    });
+    if (!currentLead) {
+      return { processed: false, reason: "lead_not_found" };
+    }
+
+    const currentStatus = String(currentLead.status || "").toUpperCase();
+    if (!currentLead.automationActive) {
+      logWf2("warn", "analysis.skip.automation_inactive", {
+        explanation: "Tentativa de gerar/enviar analise ignorada: automacao inativa.",
+        workflow,
+        leadId: currentLead.id,
+        leadStatus: currentStatus || null,
+      });
+      return { processed: false, reason: "automation_inactive" };
+    }
+    if (currentStatus === "ANALISE_ENVIADA") {
+      logWf2("warn", "analysis.skip.already_sent_status", {
+        explanation:
+          "Tentativa ignorada porque o lead ja esta em ANALISE_ENVIADA (protege contra duplicidade).",
+        workflow,
+        leadId: currentLead.id,
+      });
+      return { processed: false, reason: "analysis_already_sent" };
+    }
+    if (currentStatus !== "FORMULARIO_RESPONDIDO") {
+      logWf2("warn", "analysis.skip.status_not_ready", {
+        explanation:
+          "Tentativa de gerar/enviar analise ignorada: status diferente de FORMULARIO_RESPONDIDO.",
+        workflow,
+        leadId: currentLead.id,
+        leadStatus: currentStatus || null,
+      });
+      return { processed: false, reason: "status_not_ready" };
+    }
+
+    const formId = textOrEmpty(currentLead.diagnosticoFormularioId);
+    if (!formId) {
+      await appendTimeline(prisma, {
+        workflow,
+        leadId: currentLead.id,
+        tipo: "erro_analise",
+        etapa: "etapa6",
+        direcao: "system",
+        mensagem: "Lead sem diagnostico_formulario_id para gerar analise.",
+        metadata: {},
+      });
+      logWf2("warn", "analysis.skip.missing_form_id", {
+        explanation:
+          "Tentativa de gerar/enviar analise ignorada: lead sem diagnosticoFormularioId.",
+        workflow,
+        leadId: currentLead.id,
+        leadStatus: currentStatus || null,
+      });
+      return { processed: false, reason: "missing_form_id" };
+    }
+
+    const form = await prisma.leadDiagnostico.findUnique({
+      where: { id: formId },
+    });
+    if (!form) {
+      await appendTimeline(prisma, {
+        workflow,
+        leadId: currentLead.id,
+        tipo: "erro_analise",
+        etapa: "etapa6",
+        direcao: "system",
+        mensagem: "Formulario de diagnostico nao encontrado.",
+        metadata: { formId },
+      });
+      logWf2("warn", "analysis.skip.form_not_found", {
+        explanation:
+          "Tentativa de gerar/enviar analise ignorada: formulario vinculado nao encontrado.",
+        workflow,
+        leadId: currentLead.id,
+        formId,
+      });
+      return { processed: false, reason: "form_not_found" };
+    }
+
+    const existingAnalysis = await prisma.analiseMaturidade.findFirst({
+      where: {
+        workflow,
+        leadId: currentLead.id,
+        formularioId: form.id,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existingAnalysis) {
+      logWf2("warn", "analysis.skip.already_sent_record", {
+        explanation:
+          "Tentativa ignorada porque ja existe analise registrada para este lead/formulario (protege contra duplicidade).",
+        workflow,
+        leadId: currentLead.id,
+        formId: form.id,
+        analysisUrl: existingAnalysis.arquivoUrl || null,
+      });
+      return {
+        processed: false,
+        reason: "analysis_already_sent",
+        analysisUrl: existingAnalysis.arquivoUrl || null,
+      };
+    }
+
+    const userPrompt = buildAnalysisPrompt(form, currentLead);
+    const aiResult = await generateAiReply({
+      systemPrompt: [
+        "Voce cria analises de maturidade operacional profundas e praticas para PMEs no Brasil.",
+      ].join("\n"),
+      userPrompt,
+      fallbackReply:
+        "Analise preliminar: existem oportunidades de melhoria em processos, uso de dados e governanca operacional. Recomendamos diagnostico aprofundado para plano de implementacao.",
+      useLangChain: false,
+      allowEnvFallback: true,
+      model: env.openaiModel || "gpt-4o-mini",
+      apiKey: env.openaiApiKey || "",
+    });
+
+    const analysisText = textOrEmpty(aiResult.text);
+    const publicBaseUrl =
+      textOrEmpty(env.publicWebhookBaseUrl) || `http://localhost:${env.port}`;
+    const file = await generateAnalysisPdf({
+      projectRoot: process.cwd(),
+      publicBaseUrl,
+      workflow,
+      lead: currentLead,
+      analysisText,
+    });
+    if (!file.publicUrl) {
+      throw new Error(
+        "PUBLIC_WEBHOOK_BASE_URL nao configurado para envio de documento PDF publico."
+      );
+    }
+
+    const deliveryCopy = await generateAnalysisDeliveryMessages({
+      workflow,
+      lead: currentLead,
+      form,
+    });
+    logWf2("info", "analysis.delivery_copy.generated", {
+      explanation:
+        "Mensagens de introducao/follow-up da analise geradas por IA para envio no WhatsApp.",
+      workflow,
+      leadId: currentLead.id,
+      model: deliveryCopy.model,
+      usedFallback: Boolean(deliveryCopy.usedFallback),
+      hadRepairPass: Boolean(deliveryCopy.hadRepairPass),
+      usedHardFallback: Boolean(deliveryCopy.usedHardFallback),
+      introPreview: textOrEmpty(deliveryCopy.introText).slice(0, 200),
+      followupPreview: textOrEmpty(deliveryCopy.followupText).slice(0, 200),
+    });
+
+    await sendLeadText({
+      agent,
+      provider,
+      lead: currentLead,
+      text: deliveryCopy.introText,
+    });
+    await waitAnalysisSequenceDelay();
+
+    await sendLeadDocument({
+      agent,
+      provider,
+      lead: currentLead,
+      documentUrl: file.publicUrl,
+      caption: "Sua An\u00e1lise de Maturidade Operacional da SMG.",
+      filename: file.filename,
+    });
+    await waitAnalysisSequenceDelay();
+
+    await sendLeadText({
+      agent,
+      provider,
+      lead: currentLead,
+      text: deliveryCopy.followupText,
+      forceTemplateName: textOrEmpty(agent?.providers?.meta?.templates?.analiseFollowup),
+    });
+
+    const now = new Date();
+    const effectiveConfig = config || (await ensureWorkflowConfigRows(prisma, workflow));
+    await prisma.analiseMaturidade.create({
+      data: {
+        workflow,
+        leadId: currentLead.id,
+        formularioId: form.id,
+        arquivoPath: file.relativePath,
+        arquivoUrl: file.publicUrl,
+        resumo: clipText(analysisText, 600),
+      },
+    });
+
+    const updated = await tables.lead.update({
+      where: { id: currentLead.id },
+      data: {
+        status: "ANALISE_ENVIADA",
+        ultimoEnvioIa: now,
+        followupNivel: 0,
+        proximoFollowupEm: nextFollowupDate(effectiveConfig, 0, now),
+        dadosBrutos: mergeDadosBrutos(currentLead.dadosBrutos, {
+          wf2: {
+            analysisSentAt: now.toISOString(),
+            analysisFileUrl: file.publicUrl,
+          },
+        }),
+      },
+    });
+
     await appendTimeline(prisma, {
       workflow,
-      leadId: lead.id,
-      tipo: "erro_analise",
+      leadId: currentLead.id,
+      tipo: "analise_enviada",
       etapa: "etapa6",
-      direcao: "system",
-      mensagem: "Lead sem diagnostico_formulario_id para gerar analise.",
-      metadata: {},
+      direcao: "outbound",
+      mensagem: "Analise de maturidade enviada em PDF.",
+      metadata: {
+        arquivoUrl: file.publicUrl,
+        model: aiResult.model || null,
+        usedFallback: Boolean(aiResult.usedFallback),
+      },
     });
-    logWf2("warn", "analysis.skip.missing_form_id", {
-      explanation:
-        "Tentativa de gerar/enviar analise ignorada: lead sem diagnosticoFormularioId.",
+
+    logWf2("info", "analysis.sent.success", {
+      explanation: "Analise de maturidade enviada e lead avancado para ANALISE_ENVIADA.",
       workflow,
-      leadId: lead?.id || null,
-      leadStatus: String(lead?.status || "").toUpperCase() || null,
-    });
-    return { processed: false, reason: "missing_form_id" };
-  }
-
-  const form = await prisma.leadDiagnostico.findUnique({
-    where: { id: formId },
-  });
-  if (!form) {
-    await appendTimeline(prisma, {
-      workflow,
-      leadId: lead.id,
-      tipo: "erro_analise",
-      etapa: "etapa6",
-      direcao: "system",
-      mensagem: "Formulario de diagnostico nao encontrado.",
-      metadata: { formId },
-    });
-    logWf2("warn", "analysis.skip.form_not_found", {
-      explanation:
-        "Tentativa de gerar/enviar analise ignorada: formulario vinculado nao encontrado.",
-      workflow,
-      leadId: lead?.id || null,
-      formId,
-    });
-    return { processed: false, reason: "form_not_found" };
-  }
-
-  const userPrompt = buildAnalysisPrompt(form, lead);
-  const aiResult = await generateAiReply({
-    systemPrompt: [
-      "Voce cria analises de maturidade operacional profundas e praticas para PMEs no Brasil.",
-    ].join("\n"),
-    userPrompt,
-    fallbackReply:
-      "Analise preliminar: existem oportunidades de melhoria em processos, uso de dados e governanca operacional. Recomendamos diagnostico aprofundado para plano de implementacao.",
-    useLangChain: false,
-    allowEnvFallback: true,
-    model: env.openaiModel || "gpt-4o-mini",
-    apiKey: env.openaiApiKey || "",
-  });
-
-  const analysisText = textOrEmpty(aiResult.text);
-  const publicBaseUrl =
-    textOrEmpty(env.publicWebhookBaseUrl) || `http://localhost:${env.port}`;
-  const file = await generateAnalysisPdf({
-    projectRoot: process.cwd(),
-    publicBaseUrl,
-    workflow,
-    lead,
-    analysisText,
-  });
-  if (!file.publicUrl) {
-    throw new Error(
-      "PUBLIC_WEBHOOK_BASE_URL nao configurado para envio de documento PDF publico."
-    );
-  }
-
-  const deliveryCopy = await generateAnalysisDeliveryMessages({ workflow, lead, form });
-  logWf2("info", "analysis.delivery_copy.generated", {
-    explanation:
-      "Mensagens de introducao/follow-up da analise geradas por IA para envio no WhatsApp.",
-    workflow,
-    leadId: lead?.id || null,
-    model: deliveryCopy.model,
-    usedFallback: Boolean(deliveryCopy.usedFallback),
-    hadRepairPass: Boolean(deliveryCopy.hadRepairPass),
-    usedHardFallback: Boolean(deliveryCopy.usedHardFallback),
-    introPreview: textOrEmpty(deliveryCopy.introText).slice(0, 200),
-    followupPreview: textOrEmpty(deliveryCopy.followupText).slice(0, 200),
-  });
-
-  await sendLeadText({
-    agent,
-    provider,
-    lead,
-    text: deliveryCopy.introText,
-  });
-  await waitAnalysisSequenceDelay();
-
-  await sendLeadDocument({
-    agent,
-    provider,
-    lead,
-    documentUrl: file.publicUrl,
-    caption: "Sua An\u00e1lise de Maturidade Operacional da SMG.",
-    filename: file.filename,
-  });
-  await waitAnalysisSequenceDelay();
-
-  await sendLeadText({
-    agent,
-    provider,
-    lead,
-    text: deliveryCopy.followupText,
-    forceTemplateName: textOrEmpty(agent?.providers?.meta?.templates?.analiseFollowup),
-  });
-
-  const now = new Date();
-  const effectiveConfig = config || (await ensureWorkflowConfigRows(prisma, workflow));
-  await prisma.analiseMaturidade.create({
-    data: {
-      workflow,
-      leadId: lead.id,
-      formularioId: form.id,
-      arquivoPath: file.relativePath,
-      arquivoUrl: file.publicUrl,
-      resumo: clipText(analysisText, 600),
-    },
-  });
-
-  const updated = await tables.lead.update({
-    where: { id: lead.id },
-    data: {
-      status: "ANALISE_ENVIADA",
-      ultimoEnvioIa: now,
-      followupNivel: 0,
-      proximoFollowupEm: nextFollowupDate(effectiveConfig, 0, now),
-      dadosBrutos: mergeDadosBrutos(lead.dadosBrutos, {
-        wf2: {
-          analysisSentAt: now.toISOString(),
-          analysisFileUrl: file.publicUrl,
-        },
-      }),
-    },
-  });
-
-  await appendTimeline(prisma, {
-    workflow,
-    leadId: lead.id,
-    tipo: "analise_enviada",
-    etapa: "etapa6",
-    direcao: "outbound",
-    mensagem: "Analise de maturidade enviada em PDF.",
-    metadata: {
-      arquivoUrl: file.publicUrl,
-      model: aiResult.model || null,
+      leadId: currentLead.id,
+      formId: form.id,
+      analysisUrl: file.publicUrl,
+      aiModel: aiResult.model || null,
       usedFallback: Boolean(aiResult.usedFallback),
-    },
-  });
+    });
 
-  logWf2("info", "analysis.sent.success", {
-    explanation: "Analise de maturidade enviada e lead avancado para ANALISE_ENVIADA.",
-    workflow,
-    leadId: lead?.id || null,
-    formId: form.id,
-    analysisUrl: file.publicUrl,
-    aiModel: aiResult.model || null,
-    usedFallback: Boolean(aiResult.usedFallback),
-  });
-
-  return {
-    processed: true,
-    lead: updated,
-    analysisUrl: file.publicUrl,
-  };
+    return {
+      processed: true,
+      lead: updated,
+      analysisUrl: file.publicUrl,
+    };
+  } finally {
+    analysisInFlightLocks.delete(lockKey);
+  }
 }
 
 async function processNewOutboundLead({
@@ -1491,13 +1566,23 @@ async function registerInboundMessageEvent({
       });
     }
 
+    const shouldSuppressAiReply =
+      Boolean(analysisResult.processed) ||
+      ["analysis_in_flight", "analysis_already_sent"].includes(
+        String(analysisResult.reason || "")
+      );
+
     return {
       foundLead: true,
-      suppressAi: Boolean(analysisResult.processed),
+      suppressAi: shouldSuppressAiReply,
       reason: analysisResult.processed
         ? token
           ? "analysis_sent_after_token"
           : "analysis_sent_after_form_match"
+        : String(analysisResult.reason || "") === "analysis_already_sent"
+          ? "analysis_already_sent"
+          : String(analysisResult.reason || "") === "analysis_in_flight"
+            ? "analysis_in_flight"
         : token
           ? "token_processed"
           : "inbound_form_matched",

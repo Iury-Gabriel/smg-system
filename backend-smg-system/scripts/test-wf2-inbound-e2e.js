@@ -255,7 +255,7 @@ async function run() {
     const formMedia = formRequests.filter((item) => item.path.includes("/send/media"));
 
     assertOrThrow(formTexts.length >= 2, "Cenario 1 nao enviou os textos esperados.", formRequests);
-    assertOrThrow(formMedia.length >= 1, "Cenario 1 nao enviou o PDF da analise.", formRequests);
+    assertOrThrow(formMedia.length === 1, "Cenario 1 enviou PDF duplicado da analise.", formRequests);
     assertOrThrow(
       formTexts.some((text) => /eu sou a Clara/i.test(text)),
       "Cenario 1 nao enviou mensagem de apresentacao da Clara.",
@@ -267,16 +267,14 @@ async function run() {
       formTexts
     );
     assertOrThrow(
-      formTexts.some((text) => /diagn[o\u00f3]stico/i.test(text)),
-      "Cenario 1 nao enviou texto convidando para diagnostico.",
+      formTexts.some((text) => /(conseguiu|recebeu|abriu).*(pdf|arquivo|analise|an\u00e1lise)|abriu.*\?/i.test(text)),
+      "Cenario 1 nao pediu confirmacao de leitura da analise.",
       formTexts
     );
-    const textWithTwoSlots = formTexts.find((text) => {
-      return countHourOptions(text) >= 2 && /\bou\b/i.test(String(text));
-    });
+    const textWithTwoSlots = formTexts.find((text) => countHourOptions(text) >= 2 && /\bou\b/i.test(String(text)));
     assertOrThrow(
-      Boolean(textWithTwoSlots),
-      "Cenario 1 nao trouxe duas opcoes de horario no CTA de diagnostico.",
+      !textWithTwoSlots,
+      "Cenario 1 sugeriu horario antes do lead responder a analise.",
       formTexts
     );
 
