@@ -557,12 +557,12 @@ export default function App() {
       setFormsError('')
       try {
         const encodedQuery = encodeURIComponent(formsSearchQuery)
-        const response = await apiRequest<{ workflow: string; data: WorkflowFormSummary[] }>(
+        const response = await apiRequest<WorkflowFormSummary[]>(
           `/wf2/forms?workflow=${selectedWorkflow}&limit=200&q=${encodedQuery}`
         )
 
         if (isCancelled) return
-        const items = response?.data || []
+        const items = response || []
         setWorkflowForms(items)
         setSelectedFormId((current) => {
           if (!items.length) return ''
