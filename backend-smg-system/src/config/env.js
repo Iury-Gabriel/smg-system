@@ -54,6 +54,10 @@ const env = {
     120,
     Math.min(Number(process.env.AGENT_REPLY_CHUNK_MAX_LENGTH || 420), 1000)
   ),
+  agentReplyChunkPreferredLength: Math.max(
+    60,
+    Math.min(Number(process.env.AGENT_REPLY_CHUNK_PREFERRED_LENGTH || 180), 600)
+  ),
   wf2PollIntervalSeconds: Math.max(
     10,
     Number(process.env.WF2_POLL_INTERVAL_SECONDS || 30)

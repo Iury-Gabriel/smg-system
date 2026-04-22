@@ -1311,8 +1311,18 @@ async function createDiagnosticoFromPayload({
     lead = await tables.lead.update({
       where: { id: lead.id },
       data: {
+        status: "FORMULARIO_ENVIADO",
+        pipelineOrigin: textOrEmpty(leadPayload.pipelineOrigin || "diagnostico_site"),
+        canalAquisicao: textOrEmpty(leadPayload.canalAquisicao || "inbound_site"),
         formularioPreenchido: true,
         diagnosticoFormularioId: form.id,
+        ultimaInteracao: new Date(),
+        dadosBrutos: mergeDadosBrutos(lead.dadosBrutos, {
+          wf2: {
+            inboundToken: normalizedToken,
+            formularioCriadoAt: new Date().toISOString(),
+          },
+        }),
       },
     });
   }

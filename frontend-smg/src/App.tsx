@@ -3,7 +3,7 @@ import { ExecutionFlow, type ExecutionEvent } from './components/ExecutionFlow'
 
 const API_BASE = (import.meta.env.VITE_SMG_API_URL || 'http://localhost:3344/api').replace(/\/$/, '')
 
-type TabKey = 'overview' | 'agents' | 'conversations' | 'executions' | 'scraping' | 'config'
+type TabKey = 'overview' | 'agents' | 'conversations' | 'executions' | 'scraping' | 'forms' | 'config'
 type WorkflowKey = 'smg' | 'bsb'
 
 const NAV_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
@@ -12,6 +12,7 @@ const NAV_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'conversations', label: 'Conversas', hint: 'Histórico por lead e telefone' },
   { key: 'executions', label: 'Execuções IA', hint: 'Fluxos e eventos por rodada' },
   { key: 'scraping', label: 'Scraps e leads', hint: 'SMG/BSB no dia selecionado' },
+  { key: 'forms', label: 'Formulários', hint: 'Respostas recebidas via diagnóstico' },
   { key: 'config', label: 'Config', hint: 'Parâmetros técnicos do agente' },
 ]
 
@@ -143,6 +144,39 @@ interface WorkflowLeadSummary {
   fonteOrigem: string
 }
 
+interface FormLinkedLeadSummary {
+  id: string
+  nome: string | null
+  telefone: string | null
+  empresa: string | null
+  status: string | null
+  pipelineOrigin: string | null
+  canalAquisicao: string | null
+  diagnosticoFormularioId: string | null
+}
+
+interface WorkflowFormSummary {
+  id: string
+  workflow: string
+  token: string | null
+  telefone: string | null
+  segmento: string | null
+  faturamentoMensal: string | null
+  numFuncionarios: string | null
+  ferramentas: unknown
+  tentativaAnterior: string | null
+  mudancaOperacao: string | null
+  descricaoOperacao: string | null
+  urgencia: string | null
+  maiorDesafio: string | null
+  motivacao: string | null
+  expectativa: string | null
+  rawData: Record<string, unknown> | null
+  createdAt: string
+  updatedAt: string
+  lead: FormLinkedLeadSummary | null
+}
+
 interface DayRange {
   startMs: number
   endMs: number
@@ -271,6 +305,13 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('')
   const [workflowExecutions, setWorkflowExecutions] = useState<ScrapeExecutionSummary[]>([])
   const [workflowLeads, setWorkflowLeads] = useState<WorkflowLeadSummary[]>([])
+  const [workflowForms, setWorkflowForms] = useState<WorkflowFormSummary[]>([])
+  const [selectedFormId, setSelectedFormId] = useState('')
+  const [formsLoading, setFormsLoading] = useState(false)
+  const [formsError, setFormsError] = useState('')
+  const [formsSearchInput, setFormsSearchInput] = useState('')
+  const [formsSearchQuery, setFormsSearchQuery] = useState('')
+  const [formsRefreshToken, setFormsRefreshToken] = useState(0)
   const [scrapeLoading, setScrapeLoading] = useState(false)
   const [scrapeError, setScrapeError] = useState('')
   const [scrapeRefreshToken, setScrapeRefreshToken] = useState(0)
@@ -298,6 +339,10 @@ export default function App() {
 
   const selectedDayRange = useMemo(() => buildDayRange(selectedDate), [selectedDate])
   const hasDateFilter = Boolean(selectedDate)
+  const selectedForm = useMemo(
+    () => workflowForms.find((item) => item.id === selectedFormId) || null,
+    [workflowForms, selectedFormId]
+  )
 
   const executionsOfDay = useMemo(
     () => workflowExecutions.filter((execution) => isDateInsideRange(execution.startedAt, selectedDayRange)),
@@ -502,6 +547,47 @@ export default function App() {
     }
   }, [selectedTab, selectedWorkflow, scrapeRefreshToken])
 
+  useEffect(() => {
+    if (selectedTab !== 'forms') return
+
+    let isCancelled = false
+
+    const loadFormsDashboard = async () => {
+      setFormsLoading(true)
+      setFormsError('')
+      try {
+        const encodedQuery = encodeURIComponent(formsSearchQuery)
+        const response = await apiRequest<{ workflow: string; data: WorkflowFormSummary[] }>(
+          `/wf2/forms?workflow=${selectedWorkflow}&limit=200&q=${encodedQuery}`
+        )
+
+        if (isCancelled) return
+        const items = response?.data || []
+        setWorkflowForms(items)
+        setSelectedFormId((current) => {
+          if (!items.length) return ''
+          if (current && items.some((item) => item.id === current)) return current
+          return items[0].id
+        })
+      } catch (requestError) {
+        if (isCancelled) return
+        setWorkflowForms([])
+        setSelectedFormId('')
+        setFormsError(requestError instanceof Error ? requestError.message : 'Erro ao carregar respostas de formulário')
+      } finally {
+        if (!isCancelled) {
+          setFormsLoading(false)
+        }
+      }
+    }
+
+    loadFormsDashboard()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [selectedTab, selectedWorkflow, formsSearchQuery, formsRefreshToken])
+
   const reloadAgentSetup = async () => {
     if (!selectedAgentSlug) return
     setSetupLoading(true)
@@ -607,6 +693,11 @@ export default function App() {
     } finally {
       setSimulationRunning(false)
     }
+  }
+
+  const handleFormsSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormsSearchQuery(formsSearchInput.trim())
   }
 
   const requiresAgent = selectedTab === 'conversations' || selectedTab === 'executions' || selectedTab === 'config'
@@ -1104,6 +1195,136 @@ export default function App() {
             </div>
 
             {scrapeLoading ? <div className="panel-empty">Atualizando dados de scraps e leads...</div> : null}
+          </div>
+        ) : null}
+
+        {selectedTab === 'forms' ? (
+          <div className="forms-dashboard">
+            <div className="scrape-toolbar">
+              <div className="workflow-tabs">
+                {WORKFLOW_OPTIONS.map((workflow) => (
+                  <button
+                    key={workflow.value}
+                    type="button"
+                    className={selectedWorkflow === workflow.value ? 'tab active' : 'tab'}
+                    onClick={() => setSelectedWorkflow(workflow.value)}
+                  >
+                    {workflow.label}
+                  </button>
+                ))}
+              </div>
+
+              <form className="forms-search" onSubmit={handleFormsSearch}>
+                <input
+                  type="search"
+                  value={formsSearchInput}
+                  onChange={(event) => setFormsSearchInput(event.target.value)}
+                  placeholder="Buscar por telefone, token ou segmento"
+                />
+                <button type="submit" className="tab">
+                  Buscar
+                </button>
+                <button
+                  type="button"
+                  className="tab"
+                  onClick={() => {
+                    setFormsSearchInput('')
+                    setFormsSearchQuery('')
+                  }}
+                >
+                  Limpar
+                </button>
+                <button type="button" className="tab" onClick={() => setFormsRefreshToken((value) => value + 1)}>
+                  Atualizar
+                </button>
+              </form>
+            </div>
+
+            {formsError ? <div className="error-banner">{formsError}</div> : null}
+            <p className="muted">
+              Total carregado em {selectedWorkflow.toUpperCase()}: {workflowForms.length} formulário(s).
+            </p>
+
+            <div className="panel-grid">
+              <section className="panel-left">
+                <h3>Respostas ({workflowForms.length})</h3>
+                <div className="list-scroll">
+                  {workflowForms.map((form) => (
+                    <button
+                      key={form.id}
+                      type="button"
+                      className={`list-item ${selectedFormId === form.id ? 'is-active' : ''}`}
+                      onClick={() => setSelectedFormId(form.id)}
+                    >
+                      <div className="list-title">{form.telefone || form.token || form.id}</div>
+                      <div className="list-meta">Segmento: {form.segmento || '-'}</div>
+                      <div className="list-meta">Criado em: {formatDateTime(form.createdAt)}</div>
+                      <div className="list-meta">Lead: {form.lead?.status || 'não vinculado'}</div>
+                    </button>
+                  ))}
+                  {!workflowForms.length ? <div className="panel-empty">Nenhuma resposta encontrada.</div> : null}
+                </div>
+              </section>
+
+              <section className="panel-right">
+                <h3>Detalhes do formulário</h3>
+                {selectedForm ? (
+                  <div className="config-panel">
+                    <section>
+                      <h3>Identificação</h3>
+                      <pre>
+                        {JSON.stringify(
+                          {
+                            id: selectedForm.id,
+                            workflow: selectedForm.workflow,
+                            token: selectedForm.token,
+                            telefone: selectedForm.telefone,
+                            createdAt: selectedForm.createdAt,
+                            updatedAt: selectedForm.updatedAt,
+                          },
+                          null,
+                          2
+                        )}
+                      </pre>
+                    </section>
+                    <section>
+                      <h3>Respostas principais</h3>
+                      <pre>
+                        {JSON.stringify(
+                          {
+                            segmento: selectedForm.segmento,
+                            faturamentoMensal: selectedForm.faturamentoMensal,
+                            numFuncionarios: selectedForm.numFuncionarios,
+                            ferramentas: selectedForm.ferramentas,
+                            tentativaAnterior: selectedForm.tentativaAnterior,
+                            mudancaOperacao: selectedForm.mudancaOperacao,
+                            descricaoOperacao: selectedForm.descricaoOperacao,
+                            urgencia: selectedForm.urgencia,
+                            maiorDesafio: selectedForm.maiorDesafio,
+                            motivacao: selectedForm.motivacao,
+                            expectativa: selectedForm.expectativa,
+                          },
+                          null,
+                          2
+                        )}
+                      </pre>
+                    </section>
+                    <section>
+                      <h3>Lead vinculado</h3>
+                      <pre>{JSON.stringify(selectedForm.lead || {}, null, 2)}</pre>
+                    </section>
+                    <section>
+                      <h3>Payload bruto</h3>
+                      <pre>{JSON.stringify(selectedForm.rawData || {}, null, 2)}</pre>
+                    </section>
+                  </div>
+                ) : (
+                  <div className="panel-empty">Selecione uma resposta para visualizar os detalhes.</div>
+                )}
+              </section>
+            </div>
+
+            {formsLoading ? <div className="panel-empty">Atualizando respostas de formulário...</div> : null}
           </div>
         ) : null}
 

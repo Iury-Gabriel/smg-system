@@ -1,9 +1,31 @@
 const DEFAULT_MAX_CHUNK_LENGTH = 420;
 const MIN_MAX_CHUNK_LENGTH = 120;
 const MAX_MAX_CHUNK_LENGTH = 1000;
+const DEFAULT_PREFERRED_CHUNK_LENGTH = 180;
+const MIN_PREFERRED_CHUNK_LENGTH = 60;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function resolveChunkConfig(options = {}) {
+  const maxChunkLength = clamp(
+    Number(options.maxChunkLength) || DEFAULT_MAX_CHUNK_LENGTH,
+    MIN_MAX_CHUNK_LENGTH,
+    MAX_MAX_CHUNK_LENGTH
+  );
+
+  const preferredChunkLength = clamp(
+    Number(options.preferredChunkLength) ||
+      Math.min(DEFAULT_PREFERRED_CHUNK_LENGTH, Math.floor(maxChunkLength * 0.6)),
+    MIN_PREFERRED_CHUNK_LENGTH,
+    maxChunkLength
+  );
+
+  return {
+    maxChunkLength,
+    preferredChunkLength,
+  };
 }
 
 function normalizeRawMessage(rawText) {
@@ -14,11 +36,11 @@ function normalizeRawMessage(rawText) {
     .trim();
 }
 
-function splitByWords(text, maxChunkLength) {
+function splitByWords(text, maxChunkLength, preferredChunkLength = maxChunkLength) {
   const normalized = String(text || "").trim();
   if (!normalized) return [];
 
-  if (normalized.length <= maxChunkLength) {
+  if (normalized.length <= preferredChunkLength) {
     return [normalized];
   }
 
@@ -49,6 +71,13 @@ function splitByWords(text, maxChunkLength) {
         chunks.push(current);
       }
       current = word;
+    } else if (
+      candidate.length > preferredChunkLength &&
+      current &&
+      current.length >= Math.floor(preferredChunkLength * 0.4)
+    ) {
+      chunks.push(current);
+      current = word;
     } else {
       current = candidate;
     }
@@ -61,13 +90,63 @@ function splitByWords(text, maxChunkLength) {
   return chunks;
 }
 
-function splitBySentences(text, maxChunkLength) {
+function splitLongSentenceByPhrases(text, maxChunkLength, preferredChunkLength) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return [];
+
+  const phraseParts = normalized.split(/(?<=[,;:])\s+/g).filter(Boolean);
+  if (phraseParts.length <= 1) {
+    return splitByWords(normalized, maxChunkLength, preferredChunkLength);
+  }
+
+  const chunks = [];
+  let current = "";
+
+  for (const phrase of phraseParts) {
+    const part = String(phrase || "").trim();
+    if (!part) continue;
+
+    if (part.length > maxChunkLength) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      chunks.push(...splitByWords(part, maxChunkLength, preferredChunkLength));
+      continue;
+    }
+
+    const candidate = current ? `${current} ${part}` : part;
+    if (
+      candidate.length > preferredChunkLength &&
+      current &&
+      current.length >= Math.floor(preferredChunkLength * 0.4)
+    ) {
+      chunks.push(current);
+      current = part;
+    } else if (candidate.length > maxChunkLength) {
+      if (current) {
+        chunks.push(current);
+      }
+      current = part;
+    } else {
+      current = candidate;
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+function splitBySentences(text, maxChunkLength, preferredChunkLength = maxChunkLength) {
   const normalized = String(text || "").trim();
   if (!normalized) return [];
 
   const sentenceLikeParts = normalized.match(/[^.!?\n]+[.!?]*/g) || [];
   if (sentenceLikeParts.length === 0) {
-    return splitByWords(normalized, maxChunkLength);
+    return splitByWords(normalized, maxChunkLength, preferredChunkLength);
   }
 
   const chunks = [];
@@ -82,13 +161,20 @@ function splitBySentences(text, maxChunkLength) {
         chunks.push(current);
         current = "";
       }
-      const wordParts = splitByWords(part, maxChunkLength);
+      const wordParts = splitLongSentenceByPhrases(part, maxChunkLength, preferredChunkLength);
       chunks.push(...wordParts);
       continue;
     }
 
     const candidate = current ? `${current} ${part}` : part;
-    if (candidate.length > maxChunkLength) {
+    if (
+      candidate.length > preferredChunkLength &&
+      current &&
+      current.length >= Math.floor(preferredChunkLength * 0.4)
+    ) {
+      chunks.push(current);
+      current = part;
+    } else if (candidate.length > maxChunkLength) {
       if (current) {
         chunks.push(current);
       }
@@ -109,13 +195,9 @@ function splitMessageForWhatsapp(rawText, options = {}) {
   const normalized = normalizeRawMessage(rawText);
   if (!normalized) return [];
 
-  const maxChunkLength = clamp(
-    Number(options.maxChunkLength) || DEFAULT_MAX_CHUNK_LENGTH,
-    MIN_MAX_CHUNK_LENGTH,
-    MAX_MAX_CHUNK_LENGTH
-  );
+  const { maxChunkLength, preferredChunkLength } = resolveChunkConfig(options);
 
-  if (normalized.length <= maxChunkLength) {
+  if (normalized.length <= preferredChunkLength) {
     return [normalized];
   }
 
@@ -126,7 +208,7 @@ function splitMessageForWhatsapp(rawText, options = {}) {
 
   const chunks = [];
   for (const paragraph of paragraphs) {
-    if (paragraph.length <= maxChunkLength) {
+    if (paragraph.length <= preferredChunkLength) {
       chunks.push(paragraph);
       continue;
     }
@@ -137,15 +219,15 @@ function splitMessageForWhatsapp(rawText, options = {}) {
       .filter(Boolean);
 
     if (lines.length === 0) {
-      chunks.push(...splitBySentences(paragraph, maxChunkLength));
+      chunks.push(...splitBySentences(paragraph, maxChunkLength, preferredChunkLength));
       continue;
     }
 
     for (const line of lines) {
-      if (line.length <= maxChunkLength) {
+      if (line.length <= preferredChunkLength) {
         chunks.push(line);
       } else {
-        chunks.push(...splitBySentences(line, maxChunkLength));
+        chunks.push(...splitBySentences(line, maxChunkLength, preferredChunkLength));
       }
     }
   }
@@ -158,10 +240,11 @@ function splitMessageForWhatsapp(rawText, options = {}) {
     const previous = compacted[compacted.length - 1];
     const canMerge =
       previous &&
-      previous.length + value.length + 1 <= Math.floor(maxChunkLength * 0.8);
+      !/[.!?]$/.test(previous) &&
+      previous.length + value.length + 1 <= Math.floor(preferredChunkLength * 0.75);
 
     if (canMerge) {
-      compacted[compacted.length - 1] = `${previous}\n${value}`;
+      compacted[compacted.length - 1] = `${previous} ${value}`;
     } else {
       compacted.push(value);
     }

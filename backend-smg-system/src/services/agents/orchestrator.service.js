@@ -661,6 +661,13 @@ async function sendBufferedReply({ agent, provider, to, text }) {
 
   const chunks = buildTypingChunks(text, {
     maxChunkLength: Math.max(120, Number(env.agentReplyChunkMaxLength) || 420),
+    preferredChunkLength: Math.max(
+      60,
+      Math.min(
+        Number(env.agentReplyChunkPreferredLength) || 180,
+        Math.max(120, Number(env.agentReplyChunkMaxLength) || 420)
+      )
+    ),
   });
   const sent = [];
   const outgoing = chunks.length ? chunks : [{ text: String(text || "").trim() }];
