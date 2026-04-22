@@ -31,6 +31,10 @@ const {
 } = require("./helpers");
 
 const FINAL_STATUSES = new Set(["DESQUALIFICADO", "DIAGNOSTICO_AGENDADO"]);
+const ANALYSIS_SEQUENCE_DELAY_MS = Math.max(
+  0,
+  Number(process.env.WF2_ANALYSIS_SEQUENCE_DELAY_MS || 2500)
+);
 const OPT_OUT_REGEX = /\b(parar|sair|remover|nao quero|não quero|stop|cancelar|opt[\s-]?out)\b/i;
 
 function logWf2(level, event, payload = {}) {
@@ -88,6 +92,13 @@ function nextFollowupDate(config, level, now = new Date()) {
 
 function buildConfigDefaultDays() {
   return ["seg", "ter", "qua", "qui", "sex"];
+}
+
+async function waitAnalysisSequenceDelay() {
+  if (ANALYSIS_SEQUENCE_DELAY_MS <= 0) return;
+  await new Promise((resolve) => {
+    setTimeout(resolve, ANALYSIS_SEQUENCE_DELAY_MS);
+  });
 }
 
 async function ensureWorkflowConfigRows(prisma, workflow) {
@@ -361,6 +372,90 @@ function buildAnalysisPrompt(form, lead) {
   ].join("\n");
 }
 
+function parseJsonObjectFromText(text) {
+  const raw = textOrEmpty(text);
+  if (!raw) return null;
+
+  const withoutFence = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  const firstBrace = withoutFence.indexOf("{");
+  const lastBrace = withoutFence.lastIndexOf("}");
+  const candidate =
+    firstBrace >= 0 && lastBrace > firstBrace
+      ? withoutFence.slice(firstBrace, lastBrace + 1)
+      : withoutFence;
+
+  try {
+    const parsed = JSON.parse(candidate);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function normalizeDeliveryText(value, max = 320) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > max ? normalized.slice(0, max) : normalized;
+}
+
+async function generateAnalysisDeliveryMessages({ lead, form }) {
+  const fallbackIntro = `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua An\u00e1lise de Maturidade em PDF para voc\u00ea revisar com calma.`;
+  const fallbackFollowup =
+    "Acabei de te enviar a An\u00e1lise de Maturidade em PDF. Se fizer sentido para voc\u00ea, j\u00e1 podemos alinhar o diagn\u00f3stico guiado.";
+
+  const contextSegment = textOrEmpty(form?.segmento || lead?.segmento || "outro");
+  const contextChallenge = textOrEmpty(form?.maiorDesafio || "");
+  const contextUrgency = textOrEmpty(form?.urgencia || "");
+
+  const aiResult = await generateAiReply({
+    systemPrompt: [
+      "Voce escreve mensagens curtas para WhatsApp comercial em pt-BR.",
+      "Tom consultivo, natural e humano.",
+      "Nunca use markdown, lista, aspas extras ou emoji.",
+      "Sempre use acentuacao correta em portugues.",
+      "Retorne SOMENTE JSON valido.",
+    ].join("\n"),
+    userPrompt: [
+      "Gere duas mensagens para envio da Analise de Maturidade da SMG.",
+      'Formato exato de saida: {"introText":"...","followupText":"..."}',
+      "Regras:",
+      "- introText: apresentar-se como Clara da SMG e avisar que vai enviar o PDF agora.",
+      "- followupText: apos o envio, confirmar o envio do PDF e convidar para diagnostico guiado.",
+      "- Cada campo com no maximo 320 caracteres.",
+      "- Nao repetir frases identicas de templates fixos.",
+      "- Linguagem clara e objetiva.",
+      "",
+      `Contexto do lead: nome=${lead?.nome || "-"}, empresa=${lead?.empresa || "-"}, segmento=${contextSegment}.`,
+      `Maior desafio declarado=${contextChallenge || "-"}.`,
+      `Urgencia=${contextUrgency || "-"}.`,
+    ].join("\n"),
+    fallbackReply: JSON.stringify({
+      introText: fallbackIntro,
+      followupText: fallbackFollowup,
+    }),
+    useLangChain: false,
+    allowEnvFallback: true,
+    model: env.openaiModel || "gpt-4o-mini",
+    apiKey: env.openaiApiKey || "",
+  });
+
+  const parsed = parseJsonObjectFromText(aiResult.text);
+  const introText = normalizeDeliveryText(parsed?.introText);
+  const followupText = normalizeDeliveryText(parsed?.followupText);
+
+  return {
+    introText: introText || fallbackIntro,
+    followupText: followupText || fallbackFollowup,
+    usedFallback: Boolean(aiResult?.usedFallback) || !introText || !followupText,
+    model: aiResult?.model || null,
+  };
+}
+
 async function processAnalysisForLead({
   workflow,
   agent,
@@ -473,33 +568,41 @@ async function processAnalysisForLead({
     );
   }
 
-  const inboundLead = isInboundLead(lead);
-  const introText = inboundLead
-    ? `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua Analise de Maturidade em PDF para voce revisar com calma.`
-    : "Perfeito. Vou te enviar agora sua Analise de Maturidade em PDF.";
+  const deliveryCopy = await generateAnalysisDeliveryMessages({ lead, form });
+  logWf2("info", "analysis.delivery_copy.generated", {
+    explanation:
+      "Mensagens de introducao/follow-up da analise geradas por IA para envio no WhatsApp.",
+    workflow,
+    leadId: lead?.id || null,
+    model: deliveryCopy.model,
+    usedFallback: Boolean(deliveryCopy.usedFallback),
+    introPreview: textOrEmpty(deliveryCopy.introText).slice(0, 200),
+    followupPreview: textOrEmpty(deliveryCopy.followupText).slice(0, 200),
+  });
 
   await sendLeadText({
     agent,
     provider,
     lead,
-    text: introText,
+    text: deliveryCopy.introText,
   });
+  await waitAnalysisSequenceDelay();
 
   await sendLeadDocument({
     agent,
     provider,
     lead,
     documentUrl: file.publicUrl,
-    caption: "Sua Analise de Maturidade Operacional da SMG.",
+    caption: "Sua An\u00e1lise de Maturidade Operacional da SMG.",
     filename: file.filename,
   });
+  await waitAnalysisSequenceDelay();
 
   await sendLeadText({
     agent,
     provider,
     lead,
-    text:
-      "Acabei de te enviar a Analise de Maturidade em PDF. Se fizer sentido para voce, ja podemos alinhar o diagnostico guiado.",
+    text: deliveryCopy.followupText,
     forceTemplateName: textOrEmpty(agent?.providers?.meta?.templates?.analiseFollowup),
   });
 

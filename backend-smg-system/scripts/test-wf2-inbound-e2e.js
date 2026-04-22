@@ -254,8 +254,13 @@ async function run() {
       formTexts
     );
     assertOrThrow(
-      formTexts.some((text) => /Acabei de te enviar a Analise/i.test(text)),
-      "Cenario 1 nao enviou mensagem de follow-up da analise.",
+      formTexts.some((text) => /pdf/i.test(text)),
+      "Cenario 1 nao enviou texto mencionando o PDF da analise.",
+      formTexts
+    );
+    assertOrThrow(
+      formTexts.some((text) => /diagn[o\u00f3]stico/i.test(text)),
+      "Cenario 1 nao enviou texto convidando para diagnostico.",
       formTexts
     );
 
