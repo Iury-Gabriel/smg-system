@@ -645,6 +645,13 @@ pre {
   gap: 8px;
 }
 
+.scrape-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .forms-search {
   display: flex;
   align-items: center;
@@ -755,6 +762,10 @@ pre {
   .scrape-controls {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .scrape-actions {
+    width: 100%;
   }
 
   .scrape-controls input[type='date'] {

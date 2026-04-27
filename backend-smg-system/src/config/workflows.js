@@ -2,6 +2,8 @@ const env = require("./env");
 
 const WORKFLOW_SMG = "smg";
 const WORKFLOW_BSB = "bsb";
+const BSB_SEARCH_LOCATION = "Sao Paulo, State of Sao Paulo, Brazil";
+const BSB_SEARCH_LL = "@-23.5505,-46.6333,14z";
 
 const WORKFLOW_CONFIGS = {
   [WORKFLOW_SMG]: {
@@ -71,6 +73,8 @@ function parseWorkflowFromRequest(req, { allowAll = false } = {}) {
 module.exports = {
   WORKFLOW_SMG,
   WORKFLOW_BSB,
+  BSB_SEARCH_LOCATION,
+  BSB_SEARCH_LL,
   WORKFLOW_CONFIGS,
   resolveWorkflow,
   getWorkflowConfig,

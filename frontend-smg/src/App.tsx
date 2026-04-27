@@ -134,6 +134,7 @@ interface ScrapeExecutionSummary {
 interface WorkflowLeadSummary {
   id: string
   nome: string
+  email: string | null
   telefone: string | null
   empresa: string
   segmento: string
@@ -283,6 +284,122 @@ function isDateInsideRange(value: string | null, range: DayRange | null) {
   return timestamp >= range.startMs && timestamp < range.endMs
 }
 
+function getLeadContactValue(lead: WorkflowLeadSummary) {
+  return String(lead.email || lead.telefone || '').trim() || '-'
+}
+
+function escapeCsvValue(value: unknown) {
+  const text = String(value ?? '')
+  if (/[",\n;]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function toSafeFilePart(value: string) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'export'
+}
+
+function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string) {
+  const header = [
+    'workflow',
+    'empresa',
+    'nome',
+    'email',
+    'telefone',
+    'contato_principal',
+    'segmento',
+    'status',
+    'canal_aquisicao',
+    'pipeline_origin',
+    'fonte_origem',
+    'criado_em',
+  ]
+
+  const rows = leads.map((lead) => [
+    workflowLabel,
+    lead.empresa,
+    lead.nome,
+    lead.email || '',
+    lead.telefone || '',
+    getLeadContactValue(lead),
+    lead.segmento,
+    lead.status,
+    lead.canalAquisicao,
+    lead.pipelineOrigin,
+    lead.fonteOrigem,
+    lead.criadoEm,
+  ])
+
+  return [header, ...rows]
+    .map((row) => row.map((cell) => escapeCsvValue(cell)).join(';'))
+    .join('\n')
+}
+
+function buildLeadExportHtml(leads: WorkflowLeadSummary[], workflowLabel: string) {
+  const rows = leads
+    .map(
+      (lead) => `
+        <tr>
+          <td>${escapeHtml(workflowLabel)}</td>
+          <td>${escapeHtml(lead.empresa)}</td>
+          <td>${escapeHtml(lead.nome)}</td>
+          <td>${escapeHtml(lead.email || '')}</td>
+          <td>${escapeHtml(lead.telefone || '')}</td>
+          <td>${escapeHtml(getLeadContactValue(lead))}</td>
+          <td>${escapeHtml(lead.segmento)}</td>
+          <td>${escapeHtml(lead.status)}</td>
+          <td>${escapeHtml(lead.canalAquisicao)}</td>
+          <td>${escapeHtml(lead.pipelineOrigin)}</td>
+          <td>${escapeHtml(lead.fonteOrigem)}</td>
+          <td>${escapeHtml(lead.criadoEm)}</td>
+        </tr>`
+    )
+    .join('')
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(workflowLabel)}</title>
+</head>
+<body>
+  <table border="1">
+    <thead>
+      <tr>
+        <th>workflow</th>
+        <th>empresa</th>
+        <th>nome</th>
+        <th>email</th>
+        <th>telefone</th>
+        <th>contato_principal</th>
+        <th>segmento</th>
+        <th>status</th>
+        <th>canal_aquisicao</th>
+        <th>pipeline_origin</th>
+        <th>fonte_origem</th>
+        <th>criado_em</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>
+</body>
+</html>`
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 export default function App() {
   const [agents, setAgents] = useState<AgentSummary[]>([])
   const [selectedAgentSlug, setSelectedAgentSlug] = useState('')
@@ -353,6 +470,10 @@ export default function App() {
     () => workflowLeads.filter((lead) => isDateInsideRange(lead.criadoEm, selectedDayRange)),
     [workflowLeads, selectedDayRange]
   )
+  const leadsForExport = useMemo(
+    () => (hasDateFilter ? leadsOfDay : workflowLeads),
+    [hasDateFilter, leadsOfDay, workflowLeads]
+  )
 
   const executionTotals = useMemo(
     () =>
@@ -377,6 +498,40 @@ export default function App() {
     }
     return [...map.entries()]
   }, [agentSetup])
+
+  const handleExportLeads = (format: 'csv' | 'xls') => {
+    if (!leadsForExport.length) return
+
+    const scopeLabel = hasDateFilter ? selectedDate : 'todos'
+    const workflowLabel = selectedWorkflow.toUpperCase()
+    const safeScope = toSafeFilePart(scopeLabel)
+    const filenameBase = `leads-${workflowLabel.toLowerCase()}-${safeScope}`
+
+    if (format === 'csv') {
+      const csv = buildLeadExportCsv(leadsForExport, workflowLabel)
+      const blob = new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${filenameBase}.csv`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      return
+    }
+
+    const html = buildLeadExportHtml(leadsForExport, workflowLabel)
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${filenameBase}.xls`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
 
   const loadConversationsForAgent = async (agentSlugInput: string) => {
     if (!agentSlugInput) return
@@ -1112,6 +1267,15 @@ export default function App() {
                   Atualizar
                 </button>
               </div>
+
+              <div className="scrape-actions">
+                <button type="button" className="tab" onClick={() => handleExportLeads('csv')} disabled={!leadsForExport.length}>
+                  Exportar CSV
+                </button>
+                <button type="button" className="tab" onClick={() => handleExportLeads('xls')} disabled={!leadsForExport.length}>
+                  Exportar XLS
+                </button>
+              </div>
             </div>
 
             {scrapeError ? <div className="error-banner">{scrapeError}</div> : null}
@@ -1176,7 +1340,9 @@ export default function App() {
                     <article key={lead.id} className="list-item">
                       <div className="list-title">{lead.empresa}</div>
                       <div className="list-meta">{lead.nome || 'Sem nome'}</div>
-                      <div className="list-meta">Telefone: {lead.telefone || '-'}</div>
+                      <div className="list-meta">
+                        {lead.email ? `Email: ${lead.email}` : `Telefone: ${lead.telefone || '-'}`}
+                      </div>
                       <div className="list-meta">Segmento: {lead.segmento}</div>
                       <div className="list-meta">Status: {lead.status}</div>
                       <div className="list-meta">Origem: {lead.fonteOrigem}</div>

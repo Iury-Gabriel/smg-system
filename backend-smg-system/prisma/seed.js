@@ -100,8 +100,8 @@ const BSB_SEGMENTS = [
   { segment: LeadSegment.arquitetura, displayName: "Arquitetura e Arquitetos" },
 ];
 
-const BSB_LOCATION = "Brasilia, Federal District, Brazil";
-const BSB_LL = "@-15.793889,-47.882778,13z";
+const BSB_LOCATION = "Sao Paulo, State of Sao Paulo, Brazil";
+const BSB_LL = "@-23.5505,-46.6333,14z";
 
 const BSB_PRESETS = [
   {

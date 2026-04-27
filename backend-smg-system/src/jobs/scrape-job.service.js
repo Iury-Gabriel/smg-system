@@ -48,13 +48,13 @@ async function loadPresets(tables, requestedSegments = []) {
   });
 }
 
-async function collectLeadsFromPreset(preset) {
+async function collectLeadsFromPreset(preset, workflow) {
   if (preset.source === ScrapeSource.google_search) {
-    return fetchGoogleSearchResults(preset);
+    return fetchGoogleSearchResults(preset, workflow);
   }
 
   if (preset.source === ScrapeSource.google_maps) {
-    return fetchGoogleMapsResults(preset);
+    return fetchGoogleMapsResults(preset, workflow);
   }
 
   return { payload: {}, leads: [] };
@@ -136,7 +136,7 @@ async function runScrapeJob(jobData = {}) {
         segment: preset.segment?.segment || null,
       });
 
-      const sourceOutput = await collectLeadsFromPreset(preset);
+      const sourceOutput = await collectLeadsFromPreset(preset, workflow);
       const leads = Array.isArray(sourceOutput?.leads) ? sourceOutput.leads : [];
       const startUsed = Number.isFinite(Number(sourceOutput?.startUsed))
         ? Number(sourceOutput.startUsed)

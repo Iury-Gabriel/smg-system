@@ -1,5 +1,6 @@
 const axios = require("axios");
 const env = require("../config/env");
+const { WORKFLOW_BSB, BSB_SEARCH_LOCATION, BSB_SEARCH_LL } = require("../config/workflows");
 
 function assertSerpApiKey() {
   if (!env.serpApiKey) {
@@ -19,6 +20,20 @@ async function callSerpApi(params) {
     },
   });
   return response.data || {};
+}
+
+function resolveSearchLocation(workflow, preset) {
+  if (workflow === WORKFLOW_BSB) {
+    return BSB_SEARCH_LOCATION;
+  }
+  return preset.location || undefined;
+}
+
+function resolveSearchLl(workflow, preset) {
+  if (workflow === WORKFLOW_BSB) {
+    return BSB_SEARCH_LL;
+  }
+  return preset.ll || undefined;
 }
 
 function toNonNegativeInt(value, fallback = 0) {
@@ -71,12 +86,12 @@ function resolveNextStart(payload, currentStart, fallbackStep) {
   return candidate;
 }
 
-async function fetchGoogleSearchResults(preset) {
+async function fetchGoogleSearchResults(preset, workflow) {
   const startOffset = resolveStartOffset(preset);
   const payload = await callSerpApi({
     engine: "google",
     q: preset.query,
-    location: preset.location || undefined,
+    location: resolveSearchLocation(workflow, preset),
     google_domain: preset.googleDomain || "google.com",
     hl: preset.hl || "pt",
     gl: preset.gl || "br",
@@ -121,12 +136,12 @@ async function fetchGoogleSearchResults(preset) {
   };
 }
 
-async function fetchGoogleMapsResults(preset) {
+async function fetchGoogleMapsResults(preset, workflow) {
   const startOffset = resolveStartOffset(preset);
   const payload = await callSerpApi({
     engine: "google_maps",
     q: preset.query,
-    ll: preset.ll || undefined,
+    ll: resolveSearchLl(workflow, preset),
     hl: preset.hl || "pt",
     google_domain: preset.googleDomain || "google.com",
     start: startOffset,
