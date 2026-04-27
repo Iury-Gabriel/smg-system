@@ -432,6 +432,9 @@ export default function App() {
   const [scrapeLoading, setScrapeLoading] = useState(false)
   const [scrapeError, setScrapeError] = useState('')
   const [scrapeRefreshToken, setScrapeRefreshToken] = useState(0)
+  const [manualScrapeWorkflow, setManualScrapeWorkflow] = useState<WorkflowKey | ''>('')
+  const [manualScrapeMessage, setManualScrapeMessage] = useState('')
+  const [manualScrapeError, setManualScrapeError] = useState('')
 
   const [agentSetup, setAgentSetup] = useState<AgentSetupData | null>(null)
   const [setupFormValues, setSetupFormValues] = useState<Record<string, string>>({})
@@ -531,6 +534,30 @@ export default function App() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
+  }
+
+  const handleManualScrape = async (workflow: WorkflowKey) => {
+    if (manualScrapeWorkflow) return
+
+    setManualScrapeWorkflow(workflow)
+    setManualScrapeMessage('')
+    setManualScrapeError('')
+
+    try {
+      const result = await apiRequest<{ jobId: string; name: string; workflow: string }>('/scrape/run', {
+        method: 'POST',
+        body: { workflow },
+      })
+
+      setManualScrapeMessage(`Scrap manual disparado para ${workflow.toUpperCase()} (job ${result.jobId}).`)
+      if (workflow === selectedWorkflow) {
+        setScrapeRefreshToken((value) => value + 1)
+      }
+    } catch (requestError) {
+      setManualScrapeError(requestError instanceof Error ? requestError.message : 'Erro ao disparar scrap manual')
+    } finally {
+      setManualScrapeWorkflow('')
+    }
   }
 
   const loadConversationsForAgent = async (agentSlugInput: string) => {
@@ -1234,19 +1261,34 @@ export default function App() {
         ) : null}
 
         {selectedTab === 'scraping' ? (
-          <div className="scrape-dashboard">
-            <div className="scrape-toolbar">
-              <div className="workflow-tabs">
-                {WORKFLOW_OPTIONS.map((workflow) => (
-                  <button
-                    key={workflow.value}
-                    type="button"
-                    className={selectedWorkflow === workflow.value ? 'tab active' : 'tab'}
-                    onClick={() => setSelectedWorkflow(workflow.value)}
-                  >
-                    {workflow.label}
-                  </button>
-                ))}
+            <div className="scrape-dashboard">
+              <div className="scrape-toolbar">
+              <div className="workflow-block">
+                <div className="workflow-tabs">
+                  {WORKFLOW_OPTIONS.map((workflow) => (
+                    <button
+                      key={workflow.value}
+                      type="button"
+                      className={selectedWorkflow === workflow.value ? 'tab active' : 'tab'}
+                      onClick={() => setSelectedWorkflow(workflow.value)}
+                    >
+                      {workflow.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="workflow-run-actions">
+                  {WORKFLOW_OPTIONS.map((workflow) => (
+                    <button
+                      key={`run-${workflow.value}`}
+                      type="button"
+                      className="tab"
+                      onClick={() => handleManualScrape(workflow.value)}
+                      disabled={Boolean(manualScrapeWorkflow)}
+                    >
+                      {manualScrapeWorkflow === workflow.value ? `Rodando ${workflow.label}...` : `Scrap manual ${workflow.label}`}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="scrape-controls">
@@ -1279,6 +1321,8 @@ export default function App() {
             </div>
 
             {scrapeError ? <div className="error-banner">{scrapeError}</div> : null}
+            {manualScrapeError ? <div className="error-banner">{manualScrapeError}</div> : null}
+            {manualScrapeMessage ? <div className="success-banner">{manualScrapeMessage}</div> : null}
             <p className="muted">
               {hasDateFilter
                 ? `Filtro ativo: ${new Date(`${selectedDate}T00:00:00`).toLocaleDateString('pt-BR')}`

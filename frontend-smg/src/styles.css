@@ -639,6 +639,18 @@ pre {
   gap: 8px;
 }
 
+.workflow-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workflow-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .scrape-controls {
   display: flex;
   align-items: center;
@@ -765,6 +777,10 @@ pre {
   }
 
   .scrape-actions {
+    width: 100%;
+  }
+
+  .workflow-run-actions {
     width: 100%;
   }
 
