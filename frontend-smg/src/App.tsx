@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { ExecutionFlow, type ExecutionEvent } from './components/ExecutionFlow'
+import * as XLSX from 'xlsx'
 
 const API_BASE = (import.meta.env.VITE_SMG_API_URL || 'http://localhost:3344/api').replace(/\/$/, '')
 
@@ -137,6 +138,7 @@ interface WorkflowLeadSummary {
   email: string | null
   telefone: string | null
   instagram: string | null
+  site: string | null
   empresa: string
   segmento: string
   status: string
@@ -305,6 +307,89 @@ function toSafeFilePart(value: string) {
     .replace(/^-+|-+$/g, '') || 'export'
 }
 
+function buildLeadWorkbook(leads: WorkflowLeadSummary[], workflowLabel: string) {
+  const total = leads.length
+  const withEmail = leads.filter((lead) => Boolean(lead.email)).length
+  const withPhone = leads.filter((lead) => Boolean(lead.telefone)).length
+  const withInstagram = leads.filter((lead) => Boolean(lead.instagram)).length
+  const withSite = leads.filter((lead) => Boolean(lead.site)).length
+
+  const summaryRows = [
+    ['Relatorio', workflowLabel],
+    ['Total de leads', total],
+    ['Com email', withEmail],
+    ['Com telefone', withPhone],
+    ['Com Instagram', withInstagram],
+    ['Com site', withSite],
+    ['Gerado em', new Date().toLocaleString('pt-BR')],
+    [],
+  ]
+
+  const leadRows = [
+    [
+      'workflow',
+      'empresa',
+      'nome',
+      'contato_principal',
+      'email',
+      'telefone',
+      'instagram',
+      'site',
+      'segmento',
+      'status',
+      'canal_aquisicao',
+      'pipeline_origin',
+      'fonte_origem',
+      'criado_em',
+    ],
+    ...leads.map((lead) => [
+      workflowLabel,
+      lead.empresa,
+      lead.nome,
+      getLeadContactValue(lead),
+      lead.email || '',
+      lead.telefone || '',
+      lead.instagram || '',
+      lead.site || '',
+      lead.segmento,
+      lead.status,
+      lead.canalAquisicao,
+      lead.pipelineOrigin,
+      lead.fonteOrigem,
+      lead.criadoEm,
+    ]),
+  ]
+
+  const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows)
+  summarySheet['!cols'] = [{ wch: 22 }, { wch: 36 }]
+
+  const leadsSheet = XLSX.utils.aoa_to_sheet(leadRows)
+  leadsSheet['!cols'] = [
+    { wch: 10 },
+    { wch: 34 },
+    { wch: 28 },
+    { wch: 24 },
+    { wch: 28 },
+    { wch: 22 },
+    { wch: 28 },
+    { wch: 32 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 22 },
+  ]
+  leadsSheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { c: 0, r: 0 }, e: { c: 13, r: leadRows.length - 1 } }) }
+  leadsSheet['!freeze'] = { xSplit: 0, ySplit: 1 }
+
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumo')
+  XLSX.utils.book_append_sheet(workbook, leadsSheet, 'Leads')
+
+  return workbook
+}
+
 function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string) {
   const header = [
     'workflow',
@@ -313,6 +398,7 @@ function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string)
     'email',
     'telefone',
     'instagram',
+    'site',
     'contato_principal',
     'segmento',
     'status',
@@ -329,6 +415,7 @@ function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string)
     lead.email || '',
     lead.telefone || '',
     lead.instagram || '',
+    lead.site || '',
     getLeadContactValue(lead),
     lead.segmento,
     lead.status,
@@ -341,68 +428,6 @@ function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string)
   return [header, ...rows]
     .map((row) => row.map((cell) => escapeCsvValue(cell)).join(';'))
     .join('\n')
-}
-
-function buildLeadExportHtml(leads: WorkflowLeadSummary[], workflowLabel: string) {
-  const rows = leads
-    .map(
-      (lead) => `
-        <tr>
-          <td>${escapeHtml(workflowLabel)}</td>
-          <td>${escapeHtml(lead.empresa)}</td>
-          <td>${escapeHtml(lead.nome)}</td>
-          <td>${escapeHtml(lead.email || '')}</td>
-          <td>${escapeHtml(lead.telefone || '')}</td>
-          <td>${escapeHtml(lead.instagram || '')}</td>
-          <td>${escapeHtml(getLeadContactValue(lead))}</td>
-          <td>${escapeHtml(lead.segmento)}</td>
-          <td>${escapeHtml(lead.status)}</td>
-          <td>${escapeHtml(lead.canalAquisicao)}</td>
-          <td>${escapeHtml(lead.pipelineOrigin)}</td>
-          <td>${escapeHtml(lead.fonteOrigem)}</td>
-          <td>${escapeHtml(lead.criadoEm)}</td>
-        </tr>`
-    )
-    .join('')
-
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>${escapeHtml(workflowLabel)}</title>
-</head>
-<body>
-  <table border="1">
-    <thead>
-      <tr>
-        <th>workflow</th>
-        <th>empresa</th>
-        <th>nome</th>
-        <th>email</th>
-        <th>telefone</th>
-        <th>instagram</th>
-        <th>contato_principal</th>
-        <th>segmento</th>
-        <th>status</th>
-        <th>canal_aquisicao</th>
-        <th>pipeline_origin</th>
-        <th>fonte_origem</th>
-        <th>criado_em</th>
-      </tr>
-    </thead>
-    <tbody>${rows}</tbody>
-  </table>
-</body>
-</html>`
-}
-
-function escapeHtml(value: unknown) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
 }
 
 export default function App() {
@@ -507,7 +532,7 @@ export default function App() {
     return [...map.entries()]
   }, [agentSetup])
 
-  const handleExportLeads = (format: 'csv' | 'xls') => {
+  const handleExportLeads = (format: 'csv' | 'xlsx') => {
     if (!leadsForExport.length) return
 
     const scopeLabel = hasDateFilter ? selectedDate : 'todos'
@@ -529,12 +554,15 @@ export default function App() {
       return
     }
 
-    const html = buildLeadExportHtml(leadsForExport, workflowLabel)
-    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' })
+    const workbook = buildLeadWorkbook(leadsForExport, workflowLabel)
+    const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' })
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `${filenameBase}.xls`
+    link.download = `${filenameBase}.xlsx`
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -1322,8 +1350,8 @@ export default function App() {
                 <button type="button" className="tab" onClick={() => handleExportLeads('csv')} disabled={!leadsForExport.length}>
                   Exportar CSV
                 </button>
-                <button type="button" className="tab" onClick={() => handleExportLeads('xls')} disabled={!leadsForExport.length}>
-                  Exportar XLS
+                <button type="button" className="tab" onClick={() => handleExportLeads('xlsx')} disabled={!leadsForExport.length}>
+                  Exportar XLSX
                 </button>
               </div>
             </div>
@@ -1395,6 +1423,7 @@ export default function App() {
                       <div className="list-meta">
                         {lead.email ? `Email: ${lead.email}` : `Telefone: ${lead.telefone || '-'}`}
                       </div>
+                      <div className="list-meta">{lead.site ? `Site: ${lead.site}` : 'Site: -'}</div>
                       <div className="list-meta">{lead.instagram ? `Instagram: ${lead.instagram}` : 'Instagram: -'}</div>
                       <div className="list-meta">Segmento: {lead.segmento}</div>
                       <div className="list-meta">Status: {lead.status}</div>

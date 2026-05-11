@@ -13,6 +13,7 @@ const WORKFLOW_CONFIGS = {
     databaseUrl: env.databaseUrl,
     defaultAgentSlug: env.workflowDefaultAgentSmg || "default-sdr",
     cron: env.scraperCronSmg,
+    targetApprovedPerExecution: 34,
   },
   [WORKFLOW_BSB]: {
     id: WORKFLOW_BSB,
@@ -21,6 +22,7 @@ const WORKFLOW_CONFIGS = {
     databaseUrl: env.databaseUrl,
     defaultAgentSlug: env.workflowDefaultAgentBsb || "default-sdr",
     cron: env.scraperCronBsb,
+    targetApprovedPerExecution: 67,
   },
 };
 

@@ -76,6 +76,10 @@ function logScrape(label, payload) {
 async function runScrapeJob(jobData = {}) {
   const workflow = resolveWorkflow(jobData.workflow || WORKFLOW_SMG);
   const workflowConfig = getWorkflowConfig(workflow);
+  const targetApprovedPerExecution = Math.max(
+    1,
+    Number(workflowConfig?.targetApprovedPerExecution || jobData.targetApprovedPerExecution || 0)
+  );
   const prisma = getPrisma(workflow);
   const tables = getWorkflowTables(prisma, workflow);
   const startedAt = new Date();
@@ -89,6 +93,7 @@ async function runScrapeJob(jobData = {}) {
       details: {
         workflow,
         requestedSegments,
+        targetApprovedPerExecution,
       },
     },
   });
@@ -100,6 +105,7 @@ async function runScrapeJob(jobData = {}) {
       workflow,
       trigger: jobData.trigger || "manual",
       requestedSegments,
+      targetApprovedPerExecution,
     });
 
     const activeSegments = await loadActiveSegmentsSet(tables);
@@ -110,6 +116,7 @@ async function runScrapeJob(jobData = {}) {
       workflow,
       activeSegments: [...activeSegments],
       presetCount: presets.length,
+      targetApprovedPerExecution,
       presets: presets.map((preset) => ({
         id: preset.id,
         name: preset.name,
@@ -127,6 +134,16 @@ async function runScrapeJob(jobData = {}) {
     };
 
     for (const preset of presets) {
+      if (stats.totalApproved >= targetApprovedPerExecution) {
+        logScrape("job.target.reached", {
+          executionId: execution.id,
+          workflow,
+          targetApprovedPerExecution,
+          totalApproved: stats.totalApproved,
+        });
+        break;
+      }
+
       logScrape("preset.started", {
         executionId: execution.id,
         workflow,
@@ -147,6 +164,7 @@ async function runScrapeJob(jobData = {}) {
       let approvedInPreset = 0;
       let discardedInPreset = 0;
       let leadLogsCount = 0;
+      let stopProcessingPreset = false;
 
       stats.totalCollected += leads.length;
 
@@ -175,6 +193,11 @@ async function runScrapeJob(jobData = {}) {
       });
 
       for (const rawLead of leads) {
+        if (stats.totalApproved >= targetApprovedPerExecution) {
+          stopProcessingPreset = true;
+          break;
+        }
+
         const result = await validateAndInsertLead({
           tables,
           workflowConfig,
@@ -189,6 +212,10 @@ async function runScrapeJob(jobData = {}) {
         } else {
           discardedInPreset += 1;
           stats.totalDiscarded += 1;
+        }
+
+        if (stats.totalApproved >= targetApprovedPerExecution) {
+          stopProcessingPreset = true;
         }
 
         const canLogLead =
@@ -210,6 +237,10 @@ async function runScrapeJob(jobData = {}) {
             segmento: result.lead?.segmento || preset.segment.segment,
             fonte: result.lead?.fonte || rawLead?.fonte || preset.source,
           });
+        }
+
+        if (stopProcessingPreset) {
+          break;
         }
       }
 
@@ -233,6 +264,7 @@ async function runScrapeJob(jobData = {}) {
         collected: leads.length,
         approved: approvedInPreset,
         discarded: discardedInPreset,
+        targetReached: stats.totalApproved >= targetApprovedPerExecution,
       });
 
       logScrape("preset.finished", {
@@ -244,6 +276,7 @@ async function runScrapeJob(jobData = {}) {
         collected: leads.length,
         approved: approvedInPreset,
         discarded: discardedInPreset,
+        targetReached: stats.totalApproved >= targetApprovedPerExecution,
       });
     }
 
@@ -255,9 +288,11 @@ async function runScrapeJob(jobData = {}) {
         totalCollected: stats.totalCollected,
         totalApproved: stats.totalApproved,
         totalDiscarded: stats.totalDiscarded,
+        targetApprovedPerExecution,
         details: {
           workflow,
           requestedSegments,
+          targetApprovedPerExecution,
           presetBreakdown: stats.presetBreakdown,
         },
       },
@@ -269,11 +304,13 @@ async function runScrapeJob(jobData = {}) {
       totalCollected: stats.totalCollected,
       totalApproved: stats.totalApproved,
       totalDiscarded: stats.totalDiscarded,
+      targetApprovedPerExecution,
     });
 
     return {
       workflow,
       executionId: execution.id,
+      targetApprovedPerExecution,
       ...stats,
     };
   } catch (error) {

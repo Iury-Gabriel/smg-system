@@ -123,6 +123,11 @@ No fluxo BSB:
 - descarte por palavras-chave proibidas (paisagismo/interiores/incorporadora pura)
 - `canalAquisicao` salvo como `scrap_bsb`
 
+Metas por execucao:
+
+- `smg`: 34 leads aprovados
+- `bsb`: 67 leads aprovados
+
 No fluxo SMG:
 
 - comportamento original preservado

@@ -260,6 +260,7 @@ async function seedWorkflow(prisma, workflow) {
   if (!profile) return;
 
   const tables = getWorkflowTables(prisma, workflow);
+  const presetMaxResults = workflow === WORKFLOW_BSB ? 67 : 34;
   const segmentMap = new Map();
 
   for (const segmentConfig of profile.segments) {
@@ -293,6 +294,7 @@ async function seedWorkflow(prisma, workflow) {
       ll: preset.ll || null,
       segmentId,
       isActive: true,
+      maxResults: presetMaxResults,
     };
 
     if (existing) {
@@ -314,7 +316,7 @@ async function seedWorkflow(prisma, workflow) {
         googleDomain: "google.com.br",
         hl: "pt",
         gl: "br",
-        maxResults: 20,
+        maxResults: presetMaxResults,
         segmentId,
         isActive: true,
       },

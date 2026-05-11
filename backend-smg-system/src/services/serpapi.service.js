@@ -1,6 +1,11 @@
 const axios = require("axios");
 const env = require("../config/env");
-const { WORKFLOW_BSB, BSB_SEARCH_LOCATION, BSB_SEARCH_LL } = require("../config/workflows");
+const {
+  WORKFLOW_BSB,
+  BSB_SEARCH_LOCATION,
+  BSB_SEARCH_LL,
+  getWorkflowConfig,
+} = require("../config/workflows");
 
 function assertSerpApiKey() {
   if (!env.serpApiKey) {
@@ -40,6 +45,12 @@ function toNonNegativeInt(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.floor(parsed);
+}
+
+function resolveEffectiveMaxResults(workflow, preset) {
+  const workflowTarget = Number(getWorkflowConfig(workflow)?.targetApprovedPerExecution || 20);
+  const presetTarget = Number(preset?.maxResults || 20);
+  return Math.max(1, Math.floor(Math.max(workflowTarget, presetTarget)));
 }
 
 function resolveStartOffset(preset) {
@@ -130,7 +141,10 @@ async function fetchGoogleSearchResults(preset, workflow) {
 
   return {
     payload,
-    leads: [...leadsFromLocal, ...leadsFromOrganic].slice(0, Math.max(1, preset.maxResults || 20)),
+    leads: [...leadsFromLocal, ...leadsFromOrganic].slice(
+      0,
+      resolveEffectiveMaxResults(workflow, preset)
+    ),
     startUsed: startOffset,
     nextStart: resolveNextStart(payload, startOffset, 10),
   };
@@ -164,7 +178,7 @@ async function fetchGoogleMapsResults(preset, workflow) {
         fonte: "google_maps",
         dadosBrutos: item,
       }))
-      .slice(0, Math.max(1, preset.maxResults || 20)),
+      .slice(0, resolveEffectiveMaxResults(workflow, preset)),
     startUsed: startOffset,
     nextStart: resolveNextStart(payload, startOffset, 20),
   };
