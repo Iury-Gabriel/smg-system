@@ -288,7 +288,6 @@ async function runScrapeJob(jobData = {}) {
         totalCollected: stats.totalCollected,
         totalApproved: stats.totalApproved,
         totalDiscarded: stats.totalDiscarded,
-        targetApprovedPerExecution,
         details: {
           workflow,
           requestedSegments,
