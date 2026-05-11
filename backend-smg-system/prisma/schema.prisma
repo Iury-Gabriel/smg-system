@@ -71,6 +71,7 @@ model LeadAutomacao {
   segmento         LeadSegment
   endereco         String
   site             String?
+  instagram        String?
   email            String?
   agentSlug        String       @default("default-sdr")
   status           String       @default("NOVO_LEAD")
@@ -166,6 +167,7 @@ model LeadAutomacaoBsb {
   segmento         LeadSegment
   endereco         String
   site             String?
+  instagram        String?
   email            String?
   agentSlug        String       @default("default-sdr")
   status           String       @default("NOVO_LEAD")

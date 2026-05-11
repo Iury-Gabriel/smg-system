@@ -2,7 +2,15 @@
 const { DiscardReason, LeadSegment } = require("@prisma/client");
 const env = require("../config/env");
 const { WORKFLOW_BSB } = require("../config/workflows");
-const { normalizeLeadShape, normalizeText } = require("./lead-normalizer.service");
+const {
+  normalizeLeadShape,
+  normalizeText,
+  pickBestCompanyName,
+  normalizePhoneE164,
+  isPhoneWithAreaCode,
+  isGenericCompanyName,
+  normalizeInstagramValue,
+} = require("./lead-normalizer.service");
 const { scrapeWebsiteContacts } = require("./site-scraper.service");
 
 function toDiscardReason(value, fallback = DiscardReason.erro_interno) {
@@ -43,6 +51,7 @@ function buildLeadLogContext(lead) {
     segmento: lead?.segmento || null,
     fonte: lead?.fonte || null,
     site: lead?.site || null,
+    instagram: lead?.instagram || null,
   };
 }
 
@@ -60,6 +69,37 @@ const BSB_ALLOW_CONSTRUCTION_KEYWORDS = [
   "engenharia",
   "arquitet",
   "empreendimento",
+];
+
+const BSB_SITE_FIT_KEYWORDS = [
+  "execucao de obras",
+  "execução de obras",
+  "gerenciamento de obras",
+  "acompanhamento de obra",
+  "acompanhamento de obras",
+  "obra civil",
+  "obras civis",
+  "construcao civil",
+  "construção civil",
+  "construtora",
+  "construtor",
+  "engenharia",
+  "engenheiro",
+  "engenheira",
+  "consultoria",
+  "consultor",
+  "consultora",
+  "consultoria tecnica",
+  "consultoria técnica",
+  "projeto estrutural",
+  "projeto arquitetonico",
+  "projeto arquitetônico",
+  "arquitetura",
+  "arquiteto",
+  "arquiteta",
+  "urbanismo",
+  "reforma",
+  "reformas",
 ];
 
 function shouldDiscardBsbLeadByForbiddenKeywords(rawLead, lead) {
@@ -91,32 +131,100 @@ function shouldDiscardBsbLeadByForbiddenKeywords(rawLead, lead) {
   return BSB_FORBIDDEN_KEYWORDS.some((keyword) => searchable.includes(keyword));
 }
 
-async function enrichLeadFromWebsite(lead) {
-  if (!env.enableWebsiteEnrichment) return lead;
-  if (!lead.site) return lead;
+function buildWebsiteSearchText(inspection = {}) {
+  return [
+    inspection.title,
+    inspection.ogTitle,
+    inspection.ogSiteName,
+    inspection.description,
+    ...(Array.isArray(inspection.h1) ? inspection.h1 : []),
+    ...(Array.isArray(inspection.structuredNames) ? inspection.structuredNames : []),
+    inspection.bodyText,
+  ]
+    .map((value) => normalizeText(value).toLowerCase())
+    .filter(Boolean)
+    .join(" | ");
+}
 
-  const enrichment = await scrapeWebsiteContacts(lead.site);
-  const nextLead = { ...lead };
+function isBsbSiteFit(inspection = {}) {
+  const searchable = buildWebsiteSearchText(inspection);
+  if (!searchable) return false;
 
-  if (!nextLead.email && Array.isArray(enrichment.emails) && enrichment.emails.length > 0) {
-    nextLead.email = enrichment.emails[0];
+  return BSB_SITE_FIT_KEYWORDS.some((keyword) =>
+    searchable.includes(normalizeText(keyword).toLowerCase())
+  );
+}
+
+function resolveBsbPhoneCandidate(rawLead, inspection = {}) {
+  const candidates = [
+    rawLead?.telefoneBruto,
+    rawLead?.telefone,
+    ...(Array.isArray(inspection.phones) ? inspection.phones : []),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalized = normalizePhoneE164(candidate);
+    if (normalized && isPhoneWithAreaCode(normalized, "11")) {
+      return candidate;
+    }
   }
 
-  if (!nextLead.telefone && Array.isArray(enrichment.phones) && enrichment.phones.length > 0) {
-    const probe = normalizeLeadShape(
-      {
-        nome: nextLead.nome,
-        empresa: nextLead.empresa,
-        endereco: nextLead.endereco,
-        telefoneBruto: enrichment.phones[0],
-        site: nextLead.site,
-        email: nextLead.email,
-        segmentoBruto: nextLead.segmento,
-        fonte: nextLead.fonte,
-      },
-      nextLead.segmento
-    );
-    nextLead.telefone = probe.telefone;
+  return null;
+}
+
+async function enrichLeadFromWebsite(rawLead, workflowId) {
+  if (!env.enableWebsiteEnrichment || !rawLead.site) {
+    return { ...rawLead, websiteInspection: null };
+  }
+
+  const inspection = await scrapeWebsiteContacts(rawLead.site);
+  const websiteCompanyName = pickBestCompanyName(
+    inspection.structuredNames,
+    inspection.ogSiteName,
+    inspection.ogTitle,
+    inspection.title,
+    inspection.h1
+  );
+
+  const nextLead = {
+    ...rawLead,
+    websiteInspection: inspection,
+    siteTitle: inspection.title || "",
+    siteDescription: inspection.description || "",
+    siteH1: Array.isArray(inspection.h1) ? inspection.h1 : [],
+    siteOgTitle: inspection.ogTitle || "",
+    siteOgSiteName: inspection.ogSiteName || "",
+    siteStructuredNames: Array.isArray(inspection.structuredNames) ? inspection.structuredNames : [],
+    siteBodyText: inspection.bodyText || "",
+    siteCompanyName: websiteCompanyName,
+  };
+
+  if (!nextLead.email && Array.isArray(inspection.emails) && inspection.emails.length > 0) {
+    nextLead.email = inspection.emails[0];
+  }
+
+  if (!nextLead.instagram) {
+    const instagramCandidate =
+      (Array.isArray(inspection.instagramUrls) && inspection.instagramUrls[0]) ||
+      (Array.isArray(inspection.instagramHandles) && inspection.instagramHandles[0]) ||
+      "";
+    const instagramFromSite = normalizeInstagramValue(instagramCandidate);
+    if (instagramFromSite) {
+      nextLead.instagram = instagramFromSite;
+    }
+  }
+
+  if (workflowId === WORKFLOW_BSB) {
+    const bsbPhoneCandidate = resolveBsbPhoneCandidate(rawLead, inspection);
+    if (bsbPhoneCandidate) {
+      nextLead.telefoneBruto = bsbPhoneCandidate;
+    }
+  } else if (!nextLead.telefone && Array.isArray(inspection.phones) && inspection.phones.length > 0) {
+    nextLead.telefoneBruto = inspection.phones[0];
+  }
+
+  if (!nextLead.empresa || isGenericCompanyName(nextLead.empresa)) {
+    nextLead.empresa = websiteCompanyName || nextLead.empresa;
   }
 
   return nextLead;
@@ -129,10 +237,11 @@ async function validateAndInsertLead({
   fallbackSegment,
   activeSegments,
 }) {
-  let lead = normalizeLeadShape(rawLead, fallbackSegment);
-  lead = await enrichLeadFromWebsite(lead);
   const workflowId = workflowConfig?.id || "smg";
+  const enrichedRawLead = await enrichLeadFromWebsite(rawLead, workflowId);
+  let lead = normalizeLeadShape(enrichedRawLead, fallbackSegment);
   const requiresPhone = workflowId !== WORKFLOW_BSB;
+  const websiteInspection = enrichedRawLead.websiteInspection || null;
 
   if (!lead.nome || lead.nome.length < 2) {
     await registerDiscard({
@@ -200,6 +309,93 @@ async function validateAndInsertLead({
       reason: DiscardReason.sem_endereco,
       lead: buildLeadLogContext(lead),
     };
+  }
+
+  if (workflowId === WORKFLOW_BSB) {
+    if (!lead.site) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_presenca_digital,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "LDR BSB exige site para validar contato e fit do lead.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_presenca_digital,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    if (!websiteInspection || !isBsbSiteFit(websiteInspection)) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_indicador_demanda,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "Site nao indicou atuacao em obras, engenharia, arquitetura ou consultoria relacionada.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_indicador_demanda,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    if (!lead.telefone || !isPhoneWithAreaCode(lead.telefone, "11")) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.numero_invalido_whatsapp,
+        telefoneTentativo: lead.telefone || rawLead.telefoneBruto || "",
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "LDR BSB exige WhatsApp com DDD 11.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.numero_invalido_whatsapp,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    if (!lead.instagram) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_presenca_digital,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "LDR BSB exige Instagram do lead, especialmente para arquitetura.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_presenca_digital,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    if (!lead.empresa || isGenericCompanyName(lead.empresa)) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_nome,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "LDR BSB exige nome real da empresa, nao um nome generico.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_nome,
+        lead: buildLeadLogContext(lead),
+      };
+    }
   }
 
   if (workflowId === WORKFLOW_BSB && shouldDiscardBsbLeadByForbiddenKeywords(rawLead, lead)) {
@@ -333,6 +529,7 @@ async function validateAndInsertLead({
       segmento: lead.segmento,
       endereco: lead.endereco,
       site: lead.site || null,
+      instagram: lead.instagram || null,
       email: lead.email || null,
       agentSlug: String(workflowConfig?.defaultAgentSlug || "default-sdr"),
       status: "NOVO_LEAD",

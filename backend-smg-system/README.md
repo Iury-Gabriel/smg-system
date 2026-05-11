@@ -116,6 +116,10 @@ No fluxo BSB:
 
 - deduplicacao adicional por `email`
 - descarte quando nao houver email
+- descarte quando nao houver site
+- descarte quando o WhatsApp nao iniciar com DDD 11
+- descarte quando nao houver Instagram identificado no site
+- validacao do conteudo do site para confirmar atuacao em obras, engenharia, arquitetura ou consultoria relacionada
 - descarte por palavras-chave proibidas (paisagismo/interiores/incorporadora pura)
 - `canalAquisicao` salvo como `scrap_bsb`
 

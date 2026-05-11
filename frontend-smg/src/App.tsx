@@ -136,6 +136,7 @@ interface WorkflowLeadSummary {
   nome: string
   email: string | null
   telefone: string | null
+  instagram: string | null
   empresa: string
   segmento: string
   status: string
@@ -285,7 +286,7 @@ function isDateInsideRange(value: string | null, range: DayRange | null) {
 }
 
 function getLeadContactValue(lead: WorkflowLeadSummary) {
-  return String(lead.email || lead.telefone || '').trim() || '-'
+  return String(lead.email || lead.telefone || lead.instagram || '').trim() || '-'
 }
 
 function escapeCsvValue(value: unknown) {
@@ -311,6 +312,7 @@ function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string)
     'nome',
     'email',
     'telefone',
+    'instagram',
     'contato_principal',
     'segmento',
     'status',
@@ -326,6 +328,7 @@ function buildLeadExportCsv(leads: WorkflowLeadSummary[], workflowLabel: string)
     lead.nome,
     lead.email || '',
     lead.telefone || '',
+    lead.instagram || '',
     getLeadContactValue(lead),
     lead.segmento,
     lead.status,
@@ -350,6 +353,7 @@ function buildLeadExportHtml(leads: WorkflowLeadSummary[], workflowLabel: string
           <td>${escapeHtml(lead.nome)}</td>
           <td>${escapeHtml(lead.email || '')}</td>
           <td>${escapeHtml(lead.telefone || '')}</td>
+          <td>${escapeHtml(lead.instagram || '')}</td>
           <td>${escapeHtml(getLeadContactValue(lead))}</td>
           <td>${escapeHtml(lead.segmento)}</td>
           <td>${escapeHtml(lead.status)}</td>
@@ -376,6 +380,7 @@ function buildLeadExportHtml(leads: WorkflowLeadSummary[], workflowLabel: string
         <th>nome</th>
         <th>email</th>
         <th>telefone</th>
+        <th>instagram</th>
         <th>contato_principal</th>
         <th>segmento</th>
         <th>status</th>
@@ -558,6 +563,10 @@ export default function App() {
     } finally {
       setManualScrapeWorkflow('')
     }
+  }
+
+  const handleRunSelectedWorkflowScrape = async () => {
+    await handleManualScrape(selectedWorkflow)
   }
 
   const loadConversationsForAgent = async (agentSlugInput: string) => {
@@ -1277,17 +1286,16 @@ export default function App() {
                   ))}
                 </div>
                 <div className="workflow-run-actions">
-                  {WORKFLOW_OPTIONS.map((workflow) => (
-                    <button
-                      key={`run-${workflow.value}`}
-                      type="button"
-                      className="tab"
-                      onClick={() => handleManualScrape(workflow.value)}
-                      disabled={Boolean(manualScrapeWorkflow)}
-                    >
-                      {manualScrapeWorkflow === workflow.value ? `Rodando ${workflow.label}...` : `Scrap manual ${workflow.label}`}
-                    </button>
-                  ))}
+                  <button
+                    type="button"
+                    className="tab active"
+                    onClick={handleRunSelectedWorkflowScrape}
+                    disabled={Boolean(manualScrapeWorkflow)}
+                  >
+                    {manualScrapeWorkflow === selectedWorkflow
+                      ? `Rodando ${selectedWorkflow.toUpperCase()}...`
+                      : `Rodar scrap agora (${selectedWorkflow.toUpperCase()})`}
+                  </button>
                 </div>
               </div>
 
@@ -1387,6 +1395,7 @@ export default function App() {
                       <div className="list-meta">
                         {lead.email ? `Email: ${lead.email}` : `Telefone: ${lead.telefone || '-'}`}
                       </div>
+                      <div className="list-meta">{lead.instagram ? `Instagram: ${lead.instagram}` : 'Instagram: -'}</div>
                       <div className="list-meta">Segmento: {lead.segmento}</div>
                       <div className="list-meta">Status: {lead.status}</div>
                       <div className="list-meta">Origem: {lead.fonteOrigem}</div>
