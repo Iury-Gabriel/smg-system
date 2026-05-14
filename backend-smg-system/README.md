@@ -118,15 +118,16 @@ No fluxo BSB:
 - descarte quando nao houver email
 - descarte quando nao houver site
 - descarte quando o WhatsApp nao iniciar com DDD 11
-- descarte quando nao houver Instagram identificado no site
+- Instagram opcional (quando existir, e salvo no lead)
 - validacao do conteudo do site para confirmar atuacao em obras, engenharia, arquitetura ou consultoria relacionada
 - descarte por palavras-chave proibidas (paisagismo/interiores/incorporadora pura)
 - `canalAquisicao` salvo como `scrap_bsb`
+- meta obrigatoria por execucao: no minimo 70 aprovados (com ate 4 passadas pelos presets no mesmo job)
 
 Metas por execucao:
 
 - `smg`: 34 leads aprovados
-- `bsb`: 67 leads aprovados
+- `bsb`: 70 leads aprovados
 
 No fluxo SMG:
 

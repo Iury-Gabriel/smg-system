@@ -22,7 +22,7 @@ const WORKFLOW_CONFIGS = {
     databaseUrl: env.databaseUrl,
     defaultAgentSlug: env.workflowDefaultAgentBsb || "default-sdr",
     cron: env.scraperCronBsb,
-    targetApprovedPerExecution: 67,
+    targetApprovedPerExecution: 70,
   },
 };
 

@@ -363,23 +363,6 @@ async function validateAndInsertLead({
       };
     }
 
-    if (!lead.instagram) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.sem_presenca_digital,
-        telefoneTentativo: lead.telefone,
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige Instagram do lead, especialmente para arquitetura.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.sem_presenca_digital,
-        lead: buildLeadLogContext(lead),
-      };
-    }
-
     if (!lead.empresa || isGenericCompanyName(lead.empresa)) {
       await registerDiscard({
         tables,

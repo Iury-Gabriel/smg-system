@@ -260,7 +260,7 @@ async function seedWorkflow(prisma, workflow) {
   if (!profile) return;
 
   const tables = getWorkflowTables(prisma, workflow);
-  const presetMaxResults = workflow === WORKFLOW_BSB ? 67 : 34;
+  const presetMaxResults = workflow === WORKFLOW_BSB ? 70 : 34;
   const segmentMap = new Map();
 
   for (const segmentConfig of profile.segments) {
