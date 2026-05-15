@@ -1859,49 +1859,50 @@ async function processWorkflowTick(workflowInput) {
         }
       }
 
-      const followupLeads = await tables.lead.findMany({
-        where: {
-          agentSlug: agent.slug,
-          automationActive: true,
-          proximoFollowupEm: {
-            lte: new Date(),
-          },
-        },
-        orderBy: { proximoFollowupEm: "asc" },
-        take: 80,
-      });
+      // Follow-ups desativados temporariamente (token Meta expirado)
+      // const followupLeads = await tables.lead.findMany({
+      //   where: {
+      //     agentSlug: agent.slug,
+      //     automationActive: true,
+      //     proximoFollowupEm: {
+      //       lte: new Date(),
+      //     },
+      //   },
+      //   orderBy: { proximoFollowupEm: "asc" },
+      //   take: 80,
+      // });
 
-      for (const lead of followupLeads) {
-        try {
-          const result = await processLeadFollowup({
-            workflow,
-            prisma,
-            tables,
-            config,
-            lead,
-            agent,
-          });
-          if (result?.processed) {
-            stats.followupsSent += 1;
-          }
-        } catch (error) {
-          logWf2("error", "followup.failed", {
-            workflow,
-            agentSlug: agent.slug,
-            leadId: lead.id,
-            message: error?.message || "unknown",
-          });
-          await appendTimeline(prisma, {
-            workflow,
-            leadId: lead.id,
-            tipo: "erro_envio",
-            etapa: "followup",
-            direcao: "system",
-            mensagem: error?.message || "Erro ao enviar follow-up.",
-            metadata: {},
-          }).catch(() => null);
-        }
-      }
+      // for (const lead of followupLeads) {
+      //   try {
+      //     const result = await processLeadFollowup({
+      //       workflow,
+      //       prisma,
+      //       tables,
+      //       config,
+      //       lead,
+      //       agent,
+      //     });
+      //     if (result?.processed) {
+      //       stats.followupsSent += 1;
+      //     }
+      //   } catch (error) {
+      //     logWf2("error", "followup.failed", {
+      //       workflow,
+      //       agentSlug: agent.slug,
+      //       leadId: lead.id,
+      //       message: error?.message || "unknown",
+      //     });
+      //     await appendTimeline(prisma, {
+      //       workflow,
+      //       leadId: lead.id,
+      //       tipo: "erro_envio",
+      //       etapa: "followup",
+      //       direcao: "system",
+      //       mensagem: error?.message || "Erro ao enviar follow-up.",
+      //       metadata: {},
+      //     }).catch(() => null);
+      //   }
+      // }
     }
   }
 

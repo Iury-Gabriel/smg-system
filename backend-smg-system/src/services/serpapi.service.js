@@ -91,7 +91,7 @@ function resolveNextStart(payload, currentStart, fallbackStep) {
   const step = Math.max(1, Number(fallbackStep || 10));
   const candidate = currentStart + step;
   if (candidate > env.serpApiMaxStart) {
-    return 0;
+    return currentStart;
   }
 
   return candidate;

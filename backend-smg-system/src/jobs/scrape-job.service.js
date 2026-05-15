@@ -187,6 +187,8 @@ async function runScrapeJob(jobData = {}) {
           break;
         }
 
+        const currentStartOffset = Number(preset.startOffset || 0);
+
         logScrape("preset.started", {
           executionId: execution.id,
           workflow,
@@ -201,10 +203,34 @@ async function runScrapeJob(jobData = {}) {
         const leads = Array.isArray(sourceOutput?.leads) ? sourceOutput.leads : [];
         const startUsed = Number.isFinite(Number(sourceOutput?.startUsed))
           ? Number(sourceOutput.startUsed)
-          : Number(preset.startOffset || 0);
+          : currentStartOffset;
         const nextStart = Number.isFinite(Number(sourceOutput?.nextStart))
           ? Number(sourceOutput.nextStart)
           : startUsed;
+
+        if (leads.length === 0 && nextStart === startUsed) {
+          logScrape("preset.exhausted", {
+            executionId: execution.id,
+            workflow,
+            presetId: preset.id,
+            startUsed,
+            pass: passIndex + 1,
+            hint: "Preset esgotou resultados disponiveis, pulando.",
+          });
+          stats.presetBreakdown.push({
+            pass: passIndex + 1,
+            presetId: preset.id,
+            name: preset.name,
+            source: preset.source,
+            startUsed,
+            nextStart: startUsed,
+            collected: 0,
+            approved: 0,
+            discarded: 0,
+            targetReached: false,
+          });
+          continue;
+        }
         let approvedInPreset = 0;
         let discardedInPreset = 0;
         let leadLogsCount = 0;
