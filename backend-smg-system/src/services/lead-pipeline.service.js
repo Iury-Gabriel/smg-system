@@ -243,101 +243,8 @@ async function validateAndInsertLead({
   const requiresPhone = workflowId !== WORKFLOW_BSB;
   const websiteInspection = enrichedRawLead.websiteInspection || null;
 
-  if (!lead.nome || lead.nome.length < 2) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.sem_nome,
-      telefoneTentativo: rawLead.telefoneBruto || "",
-      segmentoTentativo: rawLead.segmentoBruto || "",
-      dadosBrutos: rawLead,
-      mensagem: "Campo nome ausente ou invalido.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.sem_nome,
-      lead: buildLeadLogContext(lead),
-    };
-  }
-
-  if (requiresPhone && !lead.telefone) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.telefone_formato_invalido,
-      telefoneTentativo: rawLead.telefoneBruto || "",
-      segmentoTentativo: rawLead.segmentoBruto || "",
-      dadosBrutos: rawLead,
-      mensagem: "Telefone nao convertido para formato E.164.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.telefone_formato_invalido,
-      lead: buildLeadLogContext(lead),
-    };
-  }
-
-  if (!lead.empresa || lead.empresa.length < 2) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.sem_nome,
-      telefoneTentativo: lead.telefone,
-      segmentoTentativo: rawLead.segmentoBruto || "",
-      dadosBrutos: rawLead,
-      mensagem: "Campo empresa ausente ou invalido.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.sem_nome,
-      lead: buildLeadLogContext(lead),
-    };
-  }
-
-  if (workflowId !== WORKFLOW_BSB && (!lead.endereco || lead.endereco.length < 2)) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.sem_endereco,
-      telefoneTentativo: lead.telefone,
-      segmentoTentativo: rawLead.segmentoBruto || "",
-      dadosBrutos: rawLead,
-      mensagem: "Endereco ausente.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.sem_endereco,
-      lead: buildLeadLogContext(lead),
-    };
-  }
-
+  // --- BSB: unico filtro obrigatorio é email personalizado + segmento ativo + sem duplicata ---
   if (workflowId === WORKFLOW_BSB) {
-    const enderecoLower = (lead.endereco || "").toLowerCase();
-    const isSaoPaulo =
-      enderecoLower.includes("são paulo") ||
-      enderecoLower.includes("sao paulo") ||
-      enderecoLower.includes(", sp") ||
-      enderecoLower.includes("- sp") ||
-      enderecoLower.includes(" sp,") ||
-      enderecoLower.includes(" sp -");
-
-    if (!isSaoPaulo) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.fora_do_icp,
-        telefoneTentativo: lead.telefone,
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige lead localizado em Sao Paulo.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.fora_do_icp,
-        lead: buildLeadLogContext(lead),
-      };
-    }
-
     const GENERIC_EMAIL_DOMAINS = [
       "gmail.com",
       "hotmail.com",
@@ -392,6 +299,144 @@ async function validateAndInsertLead({
         lead: buildLeadLogContext(lead),
       };
     }
+
+    if (!isInsideIcp(lead.segmento, activeSegments)) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.fora_do_icp,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "Segmento fora da configuracao ativa de ICP.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.fora_do_icp,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    if (lead.email) {
+      const byEmail = await tables.lead.findFirst({
+        where: { email: lead.email },
+        select: { id: true },
+      });
+      if (byEmail) {
+        await registerDiscard({
+          tables,
+          fonte: lead.fonte,
+          motivoDescarte: DiscardReason.duplicata_email,
+          telefoneTentativo: lead.telefone,
+          segmentoTentativo: String(lead.segmento),
+          dadosBrutos: rawLead,
+          mensagem: "Email ja existe em leads_automacao para workflow BSB.",
+        });
+        return {
+          approved: false,
+          reason: DiscardReason.duplicata_email,
+          lead: buildLeadLogContext(lead),
+        };
+      }
+    }
+
+    const created = await tables.lead.create({
+      data: {
+        id: randomUUID(),
+        nome: lead.nome || lead.empresa || "Lead BSB",
+        telefone: lead.telefone || null,
+        empresa: lead.empresa || lead.nome || "Empresa",
+        segmento: lead.segmento,
+        endereco: lead.endereco || "",
+        site: lead.site || null,
+        instagram: lead.instagram || null,
+        email: lead.email || null,
+        agentSlug: String(workflowConfig?.defaultAgentSlug || "default-sdr"),
+        status: "NOVO_LEAD",
+        canalAquisicao: workflowConfig?.channel || "scrap_bsb",
+        pipelineOrigin: "automacao",
+        automationActive: true,
+        fonteOrigem: lead.fonte,
+        dadosBrutos: lead.dadosBrutos || null,
+      },
+    });
+
+    return {
+      approved: true,
+      leadId: created.id,
+      reason: null,
+      lead: buildLeadLogContext(lead),
+    };
+  }
+
+  // --- SMG: pipeline original com todos os filtros ---
+
+  if (!lead.nome || lead.nome.length < 2) {
+    await registerDiscard({
+      tables,
+      fonte: lead.fonte,
+      motivoDescarte: DiscardReason.sem_nome,
+      telefoneTentativo: rawLead.telefoneBruto || "",
+      segmentoTentativo: rawLead.segmentoBruto || "",
+      dadosBrutos: rawLead,
+      mensagem: "Campo nome ausente ou invalido.",
+    });
+    return {
+      approved: false,
+      reason: DiscardReason.sem_nome,
+      lead: buildLeadLogContext(lead),
+    };
+  }
+
+  if (!lead.telefone) {
+    await registerDiscard({
+      tables,
+      fonte: lead.fonte,
+      motivoDescarte: DiscardReason.telefone_formato_invalido,
+      telefoneTentativo: rawLead.telefoneBruto || "",
+      segmentoTentativo: rawLead.segmentoBruto || "",
+      dadosBrutos: rawLead,
+      mensagem: "Telefone nao convertido para formato E.164.",
+    });
+    return {
+      approved: false,
+      reason: DiscardReason.telefone_formato_invalido,
+      lead: buildLeadLogContext(lead),
+    };
+  }
+
+  if (!lead.empresa || lead.empresa.length < 2) {
+    await registerDiscard({
+      tables,
+      fonte: lead.fonte,
+      motivoDescarte: DiscardReason.sem_nome,
+      telefoneTentativo: lead.telefone,
+      segmentoTentativo: rawLead.segmentoBruto || "",
+      dadosBrutos: rawLead,
+      mensagem: "Campo empresa ausente ou invalido.",
+    });
+    return {
+      approved: false,
+      reason: DiscardReason.sem_nome,
+      lead: buildLeadLogContext(lead),
+    };
+  }
+
+  if (!lead.endereco || lead.endereco.length < 2) {
+    await registerDiscard({
+      tables,
+      fonte: lead.fonte,
+      motivoDescarte: DiscardReason.sem_endereco,
+      telefoneTentativo: lead.telefone,
+      segmentoTentativo: rawLead.segmentoBruto || "",
+      dadosBrutos: rawLead,
+      mensagem: "Endereco ausente.",
+    });
+    return {
+      approved: false,
+      reason: DiscardReason.sem_endereco,
+      lead: buildLeadLogContext(lead),
+    };
   }
 
   if (!isInsideIcp(lead.segmento, activeSegments)) {
@@ -429,30 +474,6 @@ async function validateAndInsertLead({
       return {
         approved: false,
         reason: DiscardReason.duplicata_telefone,
-        lead: buildLeadLogContext(lead),
-      };
-    }
-  }
-
-  if (workflowId === WORKFLOW_BSB && lead.email) {
-    const byEmail = await tables.lead.findFirst({
-      where: { email: lead.email },
-      select: { id: true },
-    });
-
-    if (byEmail) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.duplicata_email,
-        telefoneTentativo: lead.telefone,
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "Email ja existe em leads_automacao para workflow BSB.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.duplicata_email,
         lead: buildLeadLogContext(lead),
       };
     }

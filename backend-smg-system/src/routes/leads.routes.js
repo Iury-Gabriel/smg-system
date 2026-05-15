@@ -17,15 +17,20 @@ router.get("/", async (req, res, next) => {
 
     if (workflowFromQuery === "all") {
       const allRows = [];
+      let totalCount = 0;
       for (const workflowConfig of listWorkflowConfigs()) {
         const prisma = getPrisma(workflowConfig.id);
         const tables = getWorkflowTables(prisma, workflowConfig.id);
-        const rows = await tables.lead.findMany({
-          where,
-          orderBy: { criadoEm: "desc" },
-          take: limit,
-        });
+        const [rows, count] = await Promise.all([
+          tables.lead.findMany({
+            where,
+            orderBy: { criadoEm: "desc" },
+            take: limit,
+          }),
+          tables.lead.count({ where }),
+        ]);
         rows.forEach((row) => allRows.push({ ...row, workflow: workflowConfig.id }));
+        totalCount += count;
       }
 
       allRows.sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime());
@@ -33,6 +38,7 @@ router.get("/", async (req, res, next) => {
       return res.json({
         success: true,
         workflow: "all",
+        total: totalCount,
         data: allRows.slice(0, limit),
       });
     }
@@ -41,15 +47,19 @@ router.get("/", async (req, res, next) => {
     const prisma = getPrisma(workflow);
     const tables = getWorkflowTables(prisma, workflow);
 
-    const rows = await tables.lead.findMany({
-      where,
-      orderBy: { criadoEm: "desc" },
-      take: limit,
-    });
+    const [rows, totalCount] = await Promise.all([
+      tables.lead.findMany({
+        where,
+        orderBy: { criadoEm: "desc" },
+        take: limit,
+      }),
+      tables.lead.count({ where }),
+    ]);
 
     return res.json({
       success: true,
       workflow,
+      total: totalCount,
       data: rows,
     });
   } catch (error) {

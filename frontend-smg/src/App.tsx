@@ -452,6 +452,7 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('')
   const [workflowExecutions, setWorkflowExecutions] = useState<ScrapeExecutionSummary[]>([])
   const [workflowLeads, setWorkflowLeads] = useState<WorkflowLeadSummary[]>([])
+  const [workflowLeadsTotal, setWorkflowLeadsTotal] = useState<number>(0)
   const [workflowForms, setWorkflowForms] = useState<WorkflowFormSummary[]>([])
   const [selectedFormId, setSelectedFormId] = useState('')
   const [formsLoading, setFormsLoading] = useState(false)
@@ -741,14 +742,15 @@ export default function App() {
       setScrapeLoading(true)
       setScrapeError('')
       try {
-        const [executionsData, leadsData] = await Promise.all([
+        const [executionsData, leadsResponse] = await Promise.all([
           apiRequest<ScrapeExecutionSummary[]>(`/scrape/executions?workflow=${selectedWorkflow}&limit=200`),
-          apiRequest<WorkflowLeadSummary[]>(`/leads?workflow=${selectedWorkflow}&limit=500`),
+          fetch(`${API_BASE}/leads?workflow=${selectedWorkflow}&limit=500`).then(r => r.json()),
         ])
 
         if (isCancelled) return
         setWorkflowExecutions(executionsData || [])
-        setWorkflowLeads(leadsData || [])
+        setWorkflowLeads(leadsResponse?.data || [])
+        setWorkflowLeadsTotal(leadsResponse?.total ?? leadsResponse?.data?.length ?? 0)
       } catch (requestError) {
         if (isCancelled) return
         setScrapeError(requestError instanceof Error ? requestError.message : 'Erro ao carregar scraps e leads')
@@ -1363,7 +1365,7 @@ export default function App() {
               {hasDateFilter
                 ? `Filtro ativo: ${new Date(`${selectedDate}T00:00:00`).toLocaleDateString('pt-BR')}`
                 : 'Sem filtro de dia (mostrando todos os registros carregados).'}{' '}
-              Totais carregados: {workflowExecutions.length} execuções e {workflowLeads.length} leads.
+               Totais carregados: {workflowExecutions.length} execuções e {workflowLeadsTotal} leads.
             </p>
 
             <div className="stats-grid">
@@ -1414,7 +1416,7 @@ export default function App() {
               </section>
 
               <section className="panel-right">
-                <h3>{hasDateFilter ? 'Leads do dia' : 'Leads'} ({leadsOfDay.length})</h3>
+                <h3>{hasDateFilter ? 'Leads do dia' : 'Leads'} ({hasDateFilter ? leadsOfDay.length : workflowLeadsTotal})</h3>
                 <div className="list-scroll">
                   {leadsOfDay.map((lead) => (
                     <article key={lead.id} className="list-item">

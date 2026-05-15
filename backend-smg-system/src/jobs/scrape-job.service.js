@@ -52,7 +52,7 @@ async function loadPresets(tables, requestedSegments = []) {
         },
       },
     },
-    orderBy: [{ source: "asc" }, { name: "asc" }],
+    orderBy: [{ source: "desc" }, { name: "asc" }],
   });
 }
 
