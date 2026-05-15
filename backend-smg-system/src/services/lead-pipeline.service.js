@@ -173,10 +173,6 @@ function resolveBsbPhoneCandidate(rawLead, inspection = {}) {
 }
 
 async function enrichLeadFromWebsite(rawLead, workflowId) {
-  if (workflowId === WORKFLOW_BSB) {
-    return { ...rawLead, websiteInspection: null };
-  }
-
   if (!env.enableWebsiteEnrichment || !rawLead.site) {
     return { ...rawLead, websiteInspection: null };
   }
@@ -298,7 +294,7 @@ async function validateAndInsertLead({
     };
   }
 
-  if (!lead.endereco || lead.endereco.length < 2) {
+  if (workflowId !== WORKFLOW_BSB && (!lead.endereco || lead.endereco.length < 2)) {
     await registerDiscard({
       tables,
       fonte: lead.fonte,
@@ -316,44 +312,32 @@ async function validateAndInsertLead({
   }
 
   if (workflowId === WORKFLOW_BSB) {
-    if (!lead.telefone || !isPhoneWithAreaCode(lead.telefone, "11")) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.numero_invalido_whatsapp,
-        telefoneTentativo: lead.telefone || rawLead.telefoneBruto || "",
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige WhatsApp com DDD 11.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.numero_invalido_whatsapp,
-        lead: buildLeadLogContext(lead),
-      };
-    }
+    const enderecoLower = (lead.endereco || "").toLowerCase();
+    const isSaoPaulo =
+      enderecoLower.includes("são paulo") ||
+      enderecoLower.includes("sao paulo") ||
+      enderecoLower.includes(", sp") ||
+      enderecoLower.includes("- sp") ||
+      enderecoLower.includes(" sp,") ||
+      enderecoLower.includes(" sp -");
 
-    if (!lead.empresa || isGenericCompanyName(lead.empresa)) {
+    if (!isSaoPaulo) {
       await registerDiscard({
         tables,
         fonte: lead.fonte,
-        motivoDescarte: DiscardReason.sem_nome,
+        motivoDescarte: DiscardReason.fora_do_icp,
         telefoneTentativo: lead.telefone,
         segmentoTentativo: String(lead.segmento),
         dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige nome real da empresa, nao um nome generico.",
+        mensagem: "LDR BSB exige lead localizado em Sao Paulo.",
       });
       return {
         approved: false,
-        reason: DiscardReason.sem_nome,
+        reason: DiscardReason.fora_do_icp,
         lead: buildLeadLogContext(lead),
       };
     }
-  }
 
-
-
-  if (workflowId === WORKFLOW_BSB) {
     const GENERIC_EMAIL_DOMAINS = [
       "gmail.com",
       "hotmail.com",

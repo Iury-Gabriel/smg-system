@@ -173,7 +173,7 @@ async function fetchGoogleMapsResults(preset, workflow) {
         telefoneBruto: item?.phone || "",
         endereco: item?.address || "",
         site: item?.website || "",
-        email: "",
+        email: item?.email || "",
         segmentoBruto: item?.type || "",
         fonte: "google_maps",
         dadosBrutos: item,
