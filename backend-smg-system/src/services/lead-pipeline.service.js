@@ -173,6 +173,10 @@ function resolveBsbPhoneCandidate(rawLead, inspection = {}) {
 }
 
 async function enrichLeadFromWebsite(rawLead, workflowId) {
+  if (workflowId === WORKFLOW_BSB) {
+    return { ...rawLead, websiteInspection: null };
+  }
+
   if (!env.enableWebsiteEnrichment || !rawLead.site) {
     return { ...rawLead, websiteInspection: null };
   }
@@ -312,40 +316,6 @@ async function validateAndInsertLead({
   }
 
   if (workflowId === WORKFLOW_BSB) {
-    if (!lead.site) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.sem_presenca_digital,
-        telefoneTentativo: lead.telefone,
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige site para validar contato e fit do lead.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.sem_presenca_digital,
-        lead: buildLeadLogContext(lead),
-      };
-    }
-
-    if (!websiteInspection || !isBsbSiteFit(websiteInspection)) {
-      await registerDiscard({
-        tables,
-        fonte: lead.fonte,
-        motivoDescarte: DiscardReason.sem_indicador_demanda,
-        telefoneTentativo: lead.telefone,
-        segmentoTentativo: String(lead.segmento),
-        dadosBrutos: rawLead,
-        mensagem: "Site nao indicou atuacao em obras, engenharia, arquitetura ou consultoria relacionada.",
-      });
-      return {
-        approved: false,
-        reason: DiscardReason.sem_indicador_demanda,
-        lead: buildLeadLogContext(lead),
-      };
-    }
-
     if (!lead.telefone || !isPhoneWithAreaCode(lead.telefone, "11")) {
       await registerDiscard({
         tables,
@@ -381,38 +351,63 @@ async function validateAndInsertLead({
     }
   }
 
-  if (workflowId === WORKFLOW_BSB && shouldDiscardBsbLeadByForbiddenKeywords(rawLead, lead)) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.fora_do_icp,
-      telefoneTentativo: lead.telefone,
-      segmentoTentativo: String(lead.segmento),
-      dadosBrutos: rawLead,
-      mensagem: "Lead descartado por palavras-chave de segmentos proibidos no LDR BSB.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.fora_do_icp,
-      lead: buildLeadLogContext(lead),
-    };
-  }
 
-  if (workflowId === WORKFLOW_BSB && !lead.email) {
-    await registerDiscard({
-      tables,
-      fonte: lead.fonte,
-      motivoDescarte: DiscardReason.sem_email,
-      telefoneTentativo: lead.telefone,
-      segmentoTentativo: String(lead.segmento),
-      dadosBrutos: rawLead,
-      mensagem: "LDR BSB exige email valido para entrega do lead.",
-    });
-    return {
-      approved: false,
-      reason: DiscardReason.sem_email,
-      lead: buildLeadLogContext(lead),
-    };
+
+  if (workflowId === WORKFLOW_BSB) {
+    const GENERIC_EMAIL_DOMAINS = [
+      "gmail.com",
+      "hotmail.com",
+      "outlook.com",
+      "yahoo.com",
+      "yahoo.com.br",
+      "live.com",
+      "msn.com",
+      "aol.com",
+      "icloud.com",
+      "mail.com",
+      "protonmail.com",
+      "uol.com.br",
+      "bol.com.br",
+      "terra.com.br",
+      "ig.com.br",
+      "globo.com",
+      "zipmail.com.br",
+    ];
+
+    if (!lead.email) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_email,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "LDR BSB exige email personalizado para entrega do lead.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_email,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    const emailDomain = (lead.email.split("@")[1] || "").toLowerCase().trim();
+    if (GENERIC_EMAIL_DOMAINS.includes(emailDomain)) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.sem_email,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: `LDR BSB exige email personalizado. Dominio generico detectado: ${emailDomain}`,
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.sem_email,
+        lead: buildLeadLogContext(lead),
+      };
+    }
   }
 
   if (!isInsideIcp(lead.segmento, activeSegments)) {
