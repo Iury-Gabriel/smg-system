@@ -23,6 +23,8 @@ Esta pasta guarda conhecimento de suporte para a Clara.
 - `bloco-05-identificacao-decisor.md`: sinais passivos/ativos, fluxo de intermediario e rastreabilidade.
 - `bloco-06-estrutura-prompt-etapas.md`: comportamento por etapa do funil outbound/inbound.
 - `bloco-07-diferenciacao-por-segmento.md`: calibracao por segmento (dores, objecoes, tom, urgencia).
+- `bloco-08-fluxo-inbound-pdf.md`: fluxo inbound completo extraido do PDF oficial da Clara.
+- `bloco-09-fluxo-outbound-pdf.md`: fluxo outbound completo extraido do PDF oficial da Clara.
 - `aprendizados_contextuais.json`: padroes de conversa (segmento + etapa) para injecao dinamica.
 
 ## Como adicionar novos blocos

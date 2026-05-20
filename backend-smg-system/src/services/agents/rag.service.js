@@ -329,6 +329,7 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
   const leadSegment = textOrEmpty(payload?.lead?.segmento).toLowerCase();
   const pipelineOrigin = textOrEmpty(payload?.lead?.pipeline_origin).toLowerCase();
   const etapaAtual = textOrEmpty(payload?.config?.etapa_atual).toLowerCase();
+  const leadStatusUpper = String(payload?.lead?.status || "").toUpperCase();
   const text = normalizeText(chunk.text);
   const source = normalizeText(chunk.sourceId);
 
@@ -384,7 +385,6 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
     ) {
       score += 5;
     }
-    const leadStatusUpper = String(payload?.lead?.status || "").toUpperCase();
     if (leadStatusUpper === "FORMULARIO_RESPONDIDO" || leadStatusUpper === "ANALISE_ENVIADA") {
       score += 2;
     }
@@ -408,7 +408,6 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
     ) {
       score += 5;
     }
-    const leadStatusUpper = String(payload?.lead?.status || "").toUpperCase();
     if (
       leadStatusUpper === "DECISOR_IDENTIFICADO" ||
       leadStatusUpper === "INTERMEDIARIO_IDENTIFICADO" ||
@@ -439,7 +438,6 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
     ) {
       score += 5;
     }
-    const leadStatusUpper = String(payload?.lead?.status || "").toUpperCase();
     const etapa = String(payload?.config?.etapa_atual || "");
     if (
       [
@@ -485,6 +483,53 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
 
     if (pipelineOrigin === "automacao") {
       score += 1;
+    }
+  }
+
+  if (source.includes("bloco-08-fluxo-inbound-pdf")) {
+    if (
+      hasAny([
+        "inbound",
+        "analise",
+        "formulario",
+        "gargalo",
+        "micro",
+        "agendamento",
+        "diagnostico",
+      ])
+    ) {
+      score += 5;
+    }
+    if (
+      pipelineOrigin.startsWith("inbound") ||
+      leadStatusUpper === "FORMULARIO_RESPONDIDO" ||
+      leadStatusUpper === "ANALISE_ENVIADA"
+    ) {
+      score += 4;
+    }
+  }
+
+  if (source.includes("bloco-09-fluxo-outbound-pdf")) {
+    if (
+      hasAny([
+        "outbound",
+        "abertura",
+        "contextualizacao",
+        "decisor",
+        "formulario",
+        "analise",
+        "agendamento",
+      ])
+    ) {
+      score += 5;
+    }
+    if (
+      pipelineOrigin === "automacao" ||
+      leadStatusUpper === "NOVO_LEAD" ||
+      leadStatusUpper === "FORMULARIO_ENVIADO" ||
+      leadStatusUpper === "INTERMEDIARIO_IDENTIFICADO"
+    ) {
+      score += 4;
     }
   }
 
