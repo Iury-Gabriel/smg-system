@@ -348,6 +348,8 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
 
   const tokenSet = new Set(queryTokens);
   const hasAny = (items) => items.some((item) => tokenSet.has(item));
+  const inboundOrigin =
+    pipelineOrigin.startsWith("inbound") || pipelineOrigin.includes("diagnostico");
 
   if (source.includes("bloco-03-classificacao-intencao")) {
     if (
@@ -530,6 +532,125 @@ function scoreChunk(chunk, queryTokens, payload = {}) {
       leadStatusUpper === "INTERMEDIARIO_IDENTIFICADO"
     ) {
       score += 4;
+    }
+  }
+
+  if (source.includes("bloco-10-regras-invariaveis-consolidada")) {
+    if (
+      hasAny([
+        "regra",
+        "invariavel",
+        "objecao",
+        "opt",
+        "optout",
+        "preco",
+        "escopo",
+        "promessa",
+        "agendamento",
+      ])
+    ) {
+      score += 6;
+    }
+    if (
+      leadStatusUpper === "ANALISE_ENVIADA" ||
+      leadStatusUpper === "FORMULARIO_RESPONDIDO" ||
+      leadStatusUpper === "NOVO_LEAD"
+    ) {
+      score += 2;
+    }
+  }
+
+  if (source.includes("bloco-11-escalacao-live-assist-consolidada")) {
+    if (
+      hasAny([
+        "escalacao",
+        "humano",
+        "g1",
+        "g2",
+        "g3",
+        "g4",
+        "g5",
+        "g6",
+        "g7",
+        "g8",
+        "g9",
+        "g10",
+        "g11",
+        "g12",
+        "juridico",
+        "urgencia",
+        "cancelamento",
+        "remarcacao",
+        "idioma",
+        "audio",
+        "midia",
+        "advogado",
+        "procon",
+        "juridico",
+        "reclamacao",
+        "processo",
+        "cancelar",
+        "remarcar",
+        "remarcacao",
+      ])
+    ) {
+      score += 14;
+    }
+    if (hasAny(["optout", "opt", "objecao", "incerta", "intermediario"])) {
+      score += 3;
+    }
+    if (leadStatusUpper === "ANALISE_ENVIADA" || leadStatusUpper === "DIAGNOSTICO_AGENDADO") {
+      score += 2;
+    }
+  }
+
+  if (source.includes("bloco-12-payload-prioridade-consolidada")) {
+    if (
+      hasAny([
+        "payload",
+        "status",
+        "pipeline",
+        "origem",
+        "etapa",
+        "contexto",
+        "history",
+        "formulario",
+        "prioridade",
+      ])
+    ) {
+      score += 7;
+    }
+    if (inboundOrigin || pipelineOrigin === "automacao") {
+      score += 2;
+    }
+  }
+
+  if (source.includes("bloco-13-decisoes-d1-d27-consolidada")) {
+    if (
+      hasAny([
+        "decisao",
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "d9",
+        "d17",
+        "d19",
+        "d20",
+        "d21",
+        "d22",
+        "d23",
+        "d24",
+        "d25",
+        "quem",
+        "fala",
+        "identidade",
+      ])
+    ) {
+      score += 8;
+    }
+    if (inboundOrigin || pipelineOrigin === "automacao") {
+      score += 1;
     }
   }
 

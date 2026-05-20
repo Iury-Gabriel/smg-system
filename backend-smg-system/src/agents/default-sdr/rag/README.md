@@ -25,6 +25,10 @@ Esta pasta guarda conhecimento de suporte para a Clara.
 - `bloco-07-diferenciacao-por-segmento.md`: calibracao por segmento (dores, objecoes, tom, urgencia).
 - `bloco-08-fluxo-inbound-pdf.md`: fluxo inbound completo extraido do PDF oficial da Clara.
 - `bloco-09-fluxo-outbound-pdf.md`: fluxo outbound completo extraido do PDF oficial da Clara.
+- `bloco-10-regras-invariaveis-consolidada.md`: consolidado de regras N/S/C da arquitetura canonica.
+- `bloco-11-escalacao-live-assist-consolidada.md`: matriz operacional de escalacao G1-G12 e live assist.
+- `bloco-12-payload-prioridade-consolidada.md`: contrato de leitura de payload e prioridade de estado.
+- `bloco-13-decisoes-d1-d27-consolidada.md`: resumo das decisoes estrategicas aprovadas no consolidado.
 - `aprendizados_contextuais.json`: padroes de conversa (segmento + etapa) para injecao dinamica.
 
 ## Como adicionar novos blocos
