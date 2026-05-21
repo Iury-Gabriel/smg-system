@@ -9,6 +9,8 @@ router.get("/", async (req, res, next) => {
   try {
     const limit = Math.max(1, Math.min(Number(req.query.limit) || 100, 500));
     const workflowFromQuery = String(req.query?.workflow || "").trim().toLowerCase();
+    const orderInput = String(req.query?.order || "").trim().toLowerCase();
+    const sortOrder = orderInput === "asc" ? "asc" : "desc";
     const where = {};
 
     if (req.query.segment) {
@@ -24,7 +26,7 @@ router.get("/", async (req, res, next) => {
         const [rows, count] = await Promise.all([
           tables.lead.findMany({
             where,
-            orderBy: { criadoEm: "desc" },
+            orderBy: { criadoEm: sortOrder },
             take: limit,
           }),
           tables.lead.count({ where }),
@@ -33,7 +35,11 @@ router.get("/", async (req, res, next) => {
         totalCount += count;
       }
 
-      allRows.sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime());
+      allRows.sort((a, b) => {
+        const left = new Date(a.criadoEm).getTime();
+        const right = new Date(b.criadoEm).getTime();
+        return sortOrder === "asc" ? left - right : right - left;
+      });
 
       return res.json({
         success: true,
@@ -50,7 +56,7 @@ router.get("/", async (req, res, next) => {
     const [rows, totalCount] = await Promise.all([
       tables.lead.findMany({
         where,
-        orderBy: { criadoEm: "desc" },
+        orderBy: { criadoEm: sortOrder },
         take: limit,
       }),
       tables.lead.count({ where }),

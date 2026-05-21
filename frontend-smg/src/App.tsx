@@ -3,6 +3,11 @@ import { ExecutionFlow, type ExecutionEvent } from './components/ExecutionFlow'
 import * as XLSX from 'xlsx'
 
 const API_BASE = (import.meta.env.VITE_SMG_API_URL || 'http://localhost:3344/api').replace(/\/$/, '')
+const SUPABASE_CREATE_LDR_LEAD_URL = 'https://qqslhlkdjiukvjxodzpv.supabase.co/functions/v1/create-ldr-lead'
+const SUPABASE_API_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFxc2xobGtkaml1a3ZqeG9kenB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3NzQ5MTUsImV4cCI6MjA4ODM1MDkxNX0.PjylhB1wq8seW8rOkI7a2ITZMNqH52feSZaomC5UaWY'
+const BSB_DISPATCH_BATCH_SIZE = 70
+const BSB_DISPATCH_FETCH_LIMIT = 500
 
 type TabKey = 'overview' | 'agents' | 'conversations' | 'executions' | 'scraping' | 'forms' | 'config'
 type WorkflowKey = 'smg' | 'bsb'
@@ -307,6 +312,19 @@ function toSafeFilePart(value: string) {
     .replace(/^-+|-+$/g, '') || 'export'
 }
 
+function normalizePhoneDigits(value: string | null | undefined) {
+  return String(value || '').replace(/\D/g, '')
+}
+
+function hasDdd11(phoneNumber: string | null | undefined) {
+  const digits = normalizePhoneDigits(phoneNumber)
+  if (!digits) return false
+  if (digits.startsWith('55') && digits.length >= 12) {
+    return digits.slice(2, 4) === '11'
+  }
+  return digits.length >= 10 && digits.slice(0, 2) === '11'
+}
+
 function buildLeadWorkbook(leads: WorkflowLeadSummary[], workflowLabel: string) {
   const total = leads.length
   const withEmail = leads.filter((lead) => Boolean(lead.email)).length
@@ -466,6 +484,10 @@ export default function App() {
   const [manualScrapeWorkflow, setManualScrapeWorkflow] = useState<WorkflowKey | ''>('')
   const [manualScrapeMessage, setManualScrapeMessage] = useState('')
   const [manualScrapeError, setManualScrapeError] = useState('')
+  const [bsbDispatchRunning, setBsbDispatchRunning] = useState(false)
+  const [bsbDispatchMessage, setBsbDispatchMessage] = useState('')
+  const [bsbDispatchError, setBsbDispatchError] = useState('')
+  const [bsbDispatchedLeadIds, setBsbDispatchedLeadIds] = useState<string[]>([])
 
   const [agentSetup, setAgentSetup] = useState<AgentSetupData | null>(null)
   const [setupFormValues, setSetupFormValues] = useState<Record<string, string>>({})
@@ -596,6 +618,107 @@ export default function App() {
 
   const handleRunSelectedWorkflowScrape = async () => {
     await handleManualScrape(selectedWorkflow)
+  }
+
+  const handleDispatchBsbLeads = async () => {
+    if (bsbDispatchRunning) return
+
+    setBsbDispatchRunning(true)
+    setBsbDispatchMessage('')
+    setBsbDispatchError('')
+
+    try {
+      const leadsResponse = await fetch(`${API_BASE}/leads?workflow=bsb&limit=${BSB_DISPATCH_FETCH_LIMIT}&order=asc`)
+      const leadsPayload = await leadsResponse.json()
+      if (!leadsResponse.ok || leadsPayload?.success === false) {
+        throw new Error(leadsPayload?.error || 'Erro ao carregar leads da BSB')
+      }
+
+      const alreadyDispatched = new Set(bsbDispatchedLeadIds)
+      const candidates = (Array.isArray(leadsPayload?.data) ? leadsPayload.data : [])
+        .filter((lead: WorkflowLeadSummary) => hasDdd11(lead.telefone))
+        .filter((lead: WorkflowLeadSummary) => !alreadyDispatched.has(lead.id))
+        .sort((a: WorkflowLeadSummary, b: WorkflowLeadSummary) => {
+          const left = new Date(a.criadoEm).getTime()
+          const right = new Date(b.criadoEm).getTime()
+          return left - right
+        })
+
+      const selectedLeads = candidates.slice(0, BSB_DISPATCH_BATCH_SIZE)
+      if (!selectedLeads.length) {
+        setBsbDispatchMessage('Nenhum lead DDD 11 pendente para envio encontrado na BSB.')
+        return
+      }
+
+      const sendResults = await Promise.all(
+        selectedLeads.map(async (lead: WorkflowLeadSummary) => {
+          const payload = {
+            empresa: String(lead.empresa || 'Nome da Empresa'),
+            nome: String(lead.nome || 'Sem nome'),
+            email: String(lead.email || ''),
+            telefone: String(lead.telefone || ''),
+            instagram: String(lead.instagram || ''),
+            site: String(lead.site || ''),
+            segmento: String(lead.segmento || 'outro'),
+            status: 'NOVO_LEAD',
+          }
+
+          try {
+            const response = await fetch(SUPABASE_CREATE_LDR_LEAD_URL, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                apiKey: SUPABASE_API_KEY,
+                apikey: SUPABASE_API_KEY,
+                Authorization: `Bearer ${SUPABASE_API_KEY}`,
+              },
+              body: JSON.stringify(payload),
+            })
+
+            if (!response.ok) {
+              const errorText = await response.text()
+              return {
+                ok: false,
+                leadId: lead.id,
+                error: `HTTP ${response.status}${errorText ? ` - ${errorText}` : ''}`,
+              }
+            }
+
+            return { ok: true, leadId: lead.id, error: '' }
+          } catch (requestError) {
+            return {
+              ok: false,
+              leadId: lead.id,
+              error: requestError instanceof Error ? requestError.message : 'Erro de rede',
+            }
+          }
+        })
+      )
+
+      const successIds = sendResults.filter((item) => item.ok).map((item) => item.leadId)
+      const failedItems = sendResults.filter((item) => !item.ok)
+
+      if (successIds.length) {
+        setBsbDispatchedLeadIds((current) => [...new Set([...current, ...successIds])])
+      }
+
+      setBsbDispatchMessage(
+        `Disparo concluído: ${successIds.length}/${selectedLeads.length} requisições enviadas para create-ldr-lead.`
+      )
+      if (failedItems.length) {
+        const errorPreview = failedItems
+          .slice(0, 3)
+          .map((item) => item.error)
+          .join(' | ')
+        setBsbDispatchError(
+          `Falhas: ${failedItems.length}. ${errorPreview}${failedItems.length > 3 ? ' | ...' : ''}`
+        )
+      }
+    } catch (requestError) {
+      setBsbDispatchError(requestError instanceof Error ? requestError.message : 'Erro ao disparar leads BSB')
+    } finally {
+      setBsbDispatchRunning(false)
+    }
   }
 
   const loadConversationsForAgent = async (agentSlugInput: string) => {
@@ -1326,6 +1449,16 @@ export default function App() {
                       ? `Rodando ${selectedWorkflow.toUpperCase()}...`
                       : `Rodar scrap agora (${selectedWorkflow.toUpperCase()})`}
                   </button>
+                  {selectedWorkflow === 'bsb' ? (
+                    <button
+                      type="button"
+                      className="tab"
+                      onClick={handleDispatchBsbLeads}
+                      disabled={bsbDispatchRunning}
+                    >
+                      {bsbDispatchRunning ? 'Enviando 70 leads DDD 11...' : 'Enviar 70 leads DDD 11'}
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
@@ -1361,6 +1494,8 @@ export default function App() {
             {scrapeError ? <div className="error-banner">{scrapeError}</div> : null}
             {manualScrapeError ? <div className="error-banner">{manualScrapeError}</div> : null}
             {manualScrapeMessage ? <div className="success-banner">{manualScrapeMessage}</div> : null}
+            {bsbDispatchError ? <div className="error-banner">{bsbDispatchError}</div> : null}
+            {bsbDispatchMessage ? <div className="success-banner">{bsbDispatchMessage}</div> : null}
             <p className="muted">
               {hasDateFilter
                 ? `Filtro ativo: ${new Date(`${selectedDate}T00:00:00`).toLocaleDateString('pt-BR')}`
