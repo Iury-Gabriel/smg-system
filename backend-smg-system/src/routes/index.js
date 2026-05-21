@@ -5,6 +5,7 @@ const configRoutes = require("./config.routes");
 const webhooksRoutes = require("./webhooks.routes");
 const agentsRoutes = require("./agents.routes");
 const wf2Routes = require("./wf2.routes");
+const integrationsRoutes = require("./integrations.routes");
 const { listWorkflowConfigs } = require("../config/workflows");
 
 const router = express.Router();
@@ -24,5 +25,6 @@ router.use("/config", configRoutes);
 router.use("/webhooks", webhooksRoutes);
 router.use("/agents", agentsRoutes);
 router.use("/wf2", wf2Routes);
+router.use("/integrations", integrationsRoutes);
 
 module.exports = router;

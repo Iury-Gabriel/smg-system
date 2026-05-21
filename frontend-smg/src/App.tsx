@@ -3,9 +3,7 @@ import { ExecutionFlow, type ExecutionEvent } from './components/ExecutionFlow'
 import * as XLSX from 'xlsx'
 
 const API_BASE = (import.meta.env.VITE_SMG_API_URL || 'http://localhost:3344/api').replace(/\/$/, '')
-const SUPABASE_CREATE_LDR_LEAD_URL = 'https://qqslhlkdjiukvjxodzpv.supabase.co/functions/v1/create-ldr-lead'
-const SUPABASE_API_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFxc2xobGtkaml1a3ZqeG9kenB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3NzQ5MTUsImV4cCI6MjA4ODM1MDkxNX0.PjylhB1wq8seW8rOkI7a2ITZMNqH52feSZaomC5UaWY'
+const CREATE_LDR_LEAD_PROXY_URL = `${API_BASE}/integrations/supabase/create-ldr-lead`
 const BSB_DISPATCH_BATCH_SIZE = 70
 const BSB_DISPATCH_FETCH_LIMIT = 500
 
@@ -664,13 +662,10 @@ export default function App() {
           }
 
           try {
-            const response = await fetch(SUPABASE_CREATE_LDR_LEAD_URL, {
+            const response = await fetch(CREATE_LDR_LEAD_PROXY_URL, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                apiKey: SUPABASE_API_KEY,
-                apikey: SUPABASE_API_KEY,
-                Authorization: `Bearer ${SUPABASE_API_KEY}`,
               },
               body: JSON.stringify(payload),
             })

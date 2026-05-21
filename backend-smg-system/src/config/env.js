@@ -73,6 +73,14 @@ const env = {
   workerVerboseLogs:
     String(process.env.WORKER_VERBOSE_LOGS || "true").toLowerCase() === "true",
   workerLeadLogLimit: Math.max(0, Number(process.env.WORKER_LEAD_LOG_LIMIT || 0)),
+  supabaseCreateLdrLeadUrl: String(
+    process.env.SUPABASE_CREATE_LDR_LEAD_URL ||
+      "https://qqslhlkdjiukvjxodzpv.supabase.co/functions/v1/create-ldr-lead"
+  ).trim(),
+  supabaseAnonKey: String(
+    process.env.SUPABASE_ANON_KEY ||
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFxc2xobGtkaml1a3ZqeG9kenB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3NzQ5MTUsImV4cCI6MjA4ODM1MDkxNX0.PjylhB1wq8seW8rOkI7a2ITZMNqH52feSZaomC5UaWY"
+  ).trim(),
 };
 
 module.exports = env;
