@@ -6,6 +6,8 @@ const API_BASE = (import.meta.env.VITE_SMG_API_URL || 'http://localhost:3344/api
 const CREATE_LDR_LEAD_PROXY_URL = `${API_BASE}/integrations/supabase/create-ldr-lead`
 const BSB_DISPATCH_BATCH_SIZE = 70
 const BSB_DISPATCH_FETCH_LIMIT = 500
+const BSB_DISPATCH_STORAGE_KEY = 'smg.bsb.dispatchedLeadIds.v1'
+const BSB_DISPATCH_BOOTSTRAP_KEY = 'smg.bsb.bootstrapOldest70Done.v1'
 
 type TabKey = 'overview' | 'agents' | 'conversations' | 'executions' | 'scraping' | 'forms' | 'config'
 type WorkflowKey = 'smg' | 'bsb'
@@ -323,6 +325,11 @@ function hasDdd11(phoneNumber: string | null | undefined) {
   return digits.length >= 10 && digits.slice(0, 2) === '11'
 }
 
+function getLeadCreatedAtTimestamp(lead: WorkflowLeadSummary) {
+  const value = new Date(lead.criadoEm).getTime()
+  return Number.isNaN(value) ? Number.MAX_SAFE_INTEGER : value
+}
+
 function buildLeadWorkbook(leads: WorkflowLeadSummary[], workflowLabel: string) {
   const total = leads.length
   const withEmail = leads.filter((lead) => Boolean(lead.email)).length
@@ -632,19 +639,45 @@ export default function App() {
         throw new Error(leadsPayload?.error || 'Erro ao carregar leads da BSB')
       }
 
-      const alreadyDispatched = new Set(bsbDispatchedLeadIds)
-      const candidates = (Array.isArray(leadsPayload?.data) ? leadsPayload.data : [])
+      const oldestDdd11Leads = (Array.isArray(leadsPayload?.data) ? leadsPayload.data : [])
         .filter((lead: WorkflowLeadSummary) => hasDdd11(lead.telefone))
-        .filter((lead: WorkflowLeadSummary) => !alreadyDispatched.has(lead.id))
         .sort((a: WorkflowLeadSummary, b: WorkflowLeadSummary) => {
-          const left = new Date(a.criadoEm).getTime()
-          const right = new Date(b.criadoEm).getTime()
+          const left = getLeadCreatedAtTimestamp(a)
+          const right = getLeadCreatedAtTimestamp(b)
           return left - right
         })
 
+      const alreadyDispatched = new Set(bsbDispatchedLeadIds)
+      let bootstrapApplied = false
+
+      try {
+        const bootstrapDone = localStorage.getItem(BSB_DISPATCH_BOOTSTRAP_KEY) === '1'
+        if (!bootstrapDone) {
+          const bootstrapIds = oldestDdd11Leads
+            .slice(0, BSB_DISPATCH_BATCH_SIZE)
+            .map((lead: WorkflowLeadSummary) => lead.id)
+            .filter((leadId: string) => Boolean(leadId) && !alreadyDispatched.has(leadId))
+
+          if (bootstrapIds.length) {
+            bootstrapIds.forEach((leadId: string) => alreadyDispatched.add(leadId))
+            setBsbDispatchedLeadIds((current) => [...new Set([...current, ...bootstrapIds])])
+            bootstrapApplied = true
+          }
+
+          localStorage.setItem(BSB_DISPATCH_BOOTSTRAP_KEY, '1')
+        }
+      } catch {
+        // Ignore localStorage read/write errors and proceed with runtime state only.
+      }
+
+      const candidates = oldestDdd11Leads.filter((lead: WorkflowLeadSummary) => !alreadyDispatched.has(lead.id))
       const selectedLeads = candidates.slice(0, BSB_DISPATCH_BATCH_SIZE)
       if (!selectedLeads.length) {
-        setBsbDispatchMessage('Nenhum lead DDD 11 pendente para envio encontrado na BSB.')
+        setBsbDispatchMessage(
+          bootstrapApplied
+            ? 'Primeiros 70 leads DDD 11 marcados como enviados. Nao ha novo lote pendente agora.'
+            : 'Nenhum lead DDD 11 pendente para envio encontrado na BSB.'
+        )
         return
       }
 
@@ -698,7 +731,7 @@ export default function App() {
       }
 
       setBsbDispatchMessage(
-        `Disparo concluído: ${successIds.length}/${selectedLeads.length} requisições enviadas para create-ldr-lead.`
+        `Disparo concluido: ${successIds.length}/${selectedLeads.length} requisicoes enviadas para create-ldr-lead.`
       )
       if (failedItems.length) {
         const errorPreview = failedItems
@@ -745,6 +778,31 @@ export default function App() {
       setError(requestError instanceof Error ? requestError.message : 'Erro ao carregar execucoes')
     }
   }
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(BSB_DISPATCH_STORAGE_KEY)
+      if (!stored) return
+      const parsed = JSON.parse(stored)
+      if (!Array.isArray(parsed)) return
+      const sanitized = parsed
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+      if (sanitized.length) {
+        setBsbDispatchedLeadIds([...new Set(sanitized)])
+      }
+    } catch {
+      // Ignore localStorage parsing errors and keep runtime state only.
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BSB_DISPATCH_STORAGE_KEY, JSON.stringify(bsbDispatchedLeadIds))
+    } catch {
+      // Ignore localStorage write errors and keep runtime state only.
+    }
+  }, [bsbDispatchedLeadIds])
 
   useEffect(() => {
     const loadAgents = async () => {
@@ -1728,4 +1786,5 @@ export default function App() {
     </div>
   )
 }
+
 
