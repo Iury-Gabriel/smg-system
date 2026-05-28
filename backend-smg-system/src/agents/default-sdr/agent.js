@@ -3,7 +3,7 @@ const path = require("path");
 const { getWorkflowTables } = require("../../services/workflow-data-access.service");
 
 const FORM_LINK =
-  process.env.AGENT_DEFAULT_SDR_FORM_LINK || "https://smg.com.br/diagnostico";
+  process.env.AGENT_DEFAULT_SDR_FORM_LINK || "https://sistema.smgcompany.com.br/diagnostico";
 const DEFAULT_PIPELINE_ORIGIN = process.env.AGENT_DEFAULT_SDR_PIPELINE_ORIGIN || "automacao";
 const DEFAULT_CHANNEL = process.env.AGENT_DEFAULT_SDR_CHANNEL || "scrap_smg";
 

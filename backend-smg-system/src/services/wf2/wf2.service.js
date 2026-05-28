@@ -66,7 +66,7 @@ const START_SEGMENT_ALIASES = {
   arquitetura: "arquitetura",
   outro: "outro",
 };
-const DEFAULT_WF2_FORM_LINK = "https://smg.com.br/diagnostico";
+const DEFAULT_WF2_FORM_LINK = "https://sistema.smgcompany.com.br/diagnostico";
 const INBOUND_WELCOME_TEMPLATE =
   "Oi {nome}, tudo bem? Eu sou a Clara, consultora virtual da SMG. Vou te acompanhar por aqui para montar seu diagnostico operacional.";
 const INBOUND_FORM_LINK_TEMPLATE =
@@ -1025,7 +1025,7 @@ async function processNewOutboundLead({
     "Oi {nome}, tudo bem? Sou da SMG e analisamos operacoes do segmento de {segmento} para identificar ganhos rapidos de eficiencia. Posso te fazer uma pergunta curta sobre sua rotina hoje?"
   );
   const message = applyTemplateVariables(template, lead, {
-    form_link: textOrEmpty(agent?.formLink || "https://smg.com.br/diagnostico"),
+    form_link: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK),
   });
 
   await sendLeadText({
@@ -1129,7 +1129,7 @@ async function processLeadFollowup({
     defaultTextByStage[stageKey]
   );
   const message = applyTemplateVariables(templateText, lead, {
-    form_link: textOrEmpty(agent?.formLink || "https://smg.com.br/diagnostico"),
+    form_link: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK),
   });
 
   const templateByStage = {
@@ -1533,12 +1533,17 @@ async function registerInboundMessageEvent({
     normalizedStatus === "NOVO_LEAD";
 
   const currentFormId = textOrEmpty(leadForNextStep.diagnosticoFormularioId);
+  const isEmptyNovoLead =
+    normalizedStatus === "NOVO_LEAD" &&
+    !currentFormId &&
+    !leadForNextStep.formularioPreenchido &&
+    !token;
   if (currentFormId) {
     linkedForm = await prisma.leadDiagnostico.findUnique({
       where: { id: currentFormId },
     });
   }
-  if (!linkedForm && !recentlyCleared) {
+  if (!linkedForm && !recentlyCleared && !isEmptyNovoLead) {
     linkedForm = await findLatestDiagnosticoByPhone(
       prisma,
       workflow,
@@ -1591,8 +1596,8 @@ async function registerInboundMessageEvent({
   const shouldSendInboundWelcomeForm =
     !token &&
     !hasLinkedForm &&
-    isInboundLead(leadForNextStep) &&
-    normalizedStatus === "NOVO_LEAD";
+    normalizedStatus === "NOVO_LEAD" &&
+    !leadForNextStep.formularioPreenchido;
 
   if (shouldSendInboundWelcomeForm) {
     const agent = await resolveAgentForLead(leadForNextStep);
@@ -1606,6 +1611,10 @@ async function registerInboundMessageEvent({
       where: { id: leadForNextStep.id },
       data: {
         status: "FORMULARIO_ENVIADO",
+        pipelineOrigin: "inbound_whatsapp",
+        canalAquisicao: "inbound_whatsapp",
+        formularioPreenchido: false,
+        diagnosticoFormularioId: null,
         dadosBrutos: mergeDadosBrutos(leadForNextStep.dadosBrutos, {
           wf2: {
             inboundWelcomeFormSentAt: nowIso,
