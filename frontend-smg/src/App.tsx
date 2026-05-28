@@ -496,9 +496,9 @@ export default function App() {
   const [manualScrapeWorkflow, setManualScrapeWorkflow] = useState<WorkflowKey | ''>('')
   const [manualScrapeMessage, setManualScrapeMessage] = useState('')
   const [manualScrapeError, setManualScrapeError] = useState('')
-  const [smgResetOffsetsLoading, setSmgResetOffsetsLoading] = useState(false)
-  const [smgResetOffsetsMessage, setSmgResetOffsetsMessage] = useState('')
-  const [smgResetOffsetsError, setSmgResetOffsetsError] = useState('')
+  const [bsbResetOffsetsLoading, setBsbResetOffsetsLoading] = useState(false)
+  const [bsbResetOffsetsMessage, setBsbResetOffsetsMessage] = useState('')
+  const [bsbResetOffsetsError, setBsbResetOffsetsError] = useState('')
   const [bsbDispatchRunning, setBsbDispatchRunning] = useState(false)
   const [bsbDispatchMessage, setBsbDispatchMessage] = useState('')
   const [bsbDispatchError, setBsbDispatchError] = useState('')
@@ -635,41 +635,41 @@ export default function App() {
     await handleManualScrape(selectedWorkflow)
   }
 
-  const handleResetSmgStartOffset = async () => {
-    if (smgResetOffsetsLoading) return
+  const handleResetBsbStartOffset = async () => {
+    if (bsbResetOffsetsLoading) return
 
-    setSmgResetOffsetsLoading(true)
-    setSmgResetOffsetsMessage('')
-    setSmgResetOffsetsError('')
+    setBsbResetOffsetsLoading(true)
+    setBsbResetOffsetsMessage('')
+    setBsbResetOffsetsError('')
 
     try {
-      const presets = await apiRequest<SearchPresetSummary[]>('/config/presets?workflow=smg')
+      const presets = await apiRequest<SearchPresetSummary[]>('/config/presets?workflow=bsb')
       const presetIds = presets.map((preset) => String(preset.id || '').trim()).filter(Boolean)
 
       if (!presetIds.length) {
-        setSmgResetOffsetsMessage('Nenhum preset SMG encontrado para resetar.')
+        setBsbResetOffsetsMessage('Nenhum preset BSB encontrado para resetar.')
         return
       }
 
       await Promise.all(
         presetIds.map((presetId) =>
-          apiRequest(`/config/presets/${presetId}/start?workflow=smg`, {
+          apiRequest(`/config/presets/${presetId}/start?workflow=bsb`, {
             method: 'PATCH',
             body: { startOffset: 0 },
           })
         )
       )
 
-      setSmgResetOffsetsMessage(`StartOffset da SMG zerado com sucesso em ${presetIds.length} preset(s).`)
-      if (selectedWorkflow === 'smg') {
+      setBsbResetOffsetsMessage(`StartOffset da BSB zerado com sucesso em ${presetIds.length} preset(s).`)
+      if (selectedWorkflow === 'bsb') {
         setScrapeRefreshToken((value) => value + 1)
       }
     } catch (requestError) {
-      setSmgResetOffsetsError(
-        requestError instanceof Error ? requestError.message : 'Erro ao zerar startOffset da SMG'
+      setBsbResetOffsetsError(
+        requestError instanceof Error ? requestError.message : 'Erro ao zerar startOffset da BSB'
       )
     } finally {
-      setSmgResetOffsetsLoading(false)
+      setBsbResetOffsetsLoading(false)
     }
   }
 
@@ -1550,14 +1550,14 @@ export default function App() {
                       ? `Rodando ${selectedWorkflow.toUpperCase()}...`
                       : `Rodar scrap agora (${selectedWorkflow.toUpperCase()})`}
                   </button>
-                  {selectedWorkflow === 'smg' ? (
+                  {selectedWorkflow === 'bsb' ? (
                     <button
                       type="button"
                       className="tab"
-                      onClick={handleResetSmgStartOffset}
-                      disabled={smgResetOffsetsLoading}
+                      onClick={handleResetBsbStartOffset}
+                      disabled={bsbResetOffsetsLoading}
                     >
-                      {smgResetOffsetsLoading ? 'Zerando startOffset SMG...' : 'Zerar startOffset SMG'}
+                      {bsbResetOffsetsLoading ? 'Zerando startOffset BSB...' : 'Zerar startOffset BSB'}
                     </button>
                   ) : null}
                   {selectedWorkflow === 'bsb' ? (
@@ -1605,8 +1605,8 @@ export default function App() {
             {scrapeError ? <div className="error-banner">{scrapeError}</div> : null}
             {manualScrapeError ? <div className="error-banner">{manualScrapeError}</div> : null}
             {manualScrapeMessage ? <div className="success-banner">{manualScrapeMessage}</div> : null}
-            {smgResetOffsetsError ? <div className="error-banner">{smgResetOffsetsError}</div> : null}
-            {smgResetOffsetsMessage ? <div className="success-banner">{smgResetOffsetsMessage}</div> : null}
+            {bsbResetOffsetsError ? <div className="error-banner">{bsbResetOffsetsError}</div> : null}
+            {bsbResetOffsetsMessage ? <div className="success-banner">{bsbResetOffsetsMessage}</div> : null}
             {bsbDispatchError ? <div className="error-banner">{bsbDispatchError}</div> : null}
             {bsbDispatchMessage ? <div className="success-banner">{bsbDispatchMessage}</div> : null}
             <p className="muted">
