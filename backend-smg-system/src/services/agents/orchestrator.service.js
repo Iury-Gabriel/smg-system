@@ -27,6 +27,11 @@ const {
 
 const bufferTimers = new Map();
 const promptCache = new Map();
+const CLEAR_RESET_TX_OPTIONS = {
+  maxWait: 10000,
+  timeout: 30000,
+};
+const CLEAR_RESET_MAX_ATTEMPTS = 2;
 
 function logOrchestrator(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -68,6 +73,14 @@ function isClearMemoryCommand(value = "") {
 
   const firstToken = normalized.split(/\s+/)[0]?.replace(/[.,;:!?]+$/g, "") || "";
   return firstToken === "/clear";
+}
+
+function isPrismaInteractiveTxExpiredError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("transaction already closed") &&
+    message.includes("expired transaction")
+  );
 }
 
 function parseStartOutboundCommand(value = "") {
@@ -1257,73 +1270,96 @@ async function clearConversationAndPendingBuffer({
     const { wf2: _wf2, ...rawWithoutWf2 } = rawData;
     const resetAt = new Date().toISOString();
 
-    const transactionResult = await prisma.$transaction(async (tx) => {
-      const txTables = getWorkflowTables(tx, workflow);
-      const timelineDelete = await tx.leadAutomacaoTimeline.deleteMany({
-        where: {
-          workflow,
-          leadId: lead.id,
-        },
-      });
-      const crmDelete = await tx.leadCrm.deleteMany({
-        where: {
-          workflow,
-          leadId: lead.id,
-        },
-      });
-      const analysisDelete = await tx.analiseMaturidade.deleteMany({
-        where: {
-          workflow,
-          leadId: lead.id,
-        },
-      });
-      const updatedLead = await txTables.lead.update({
-        where: { id: lead.id },
-        data: {
-          status: "NOVO_LEAD",
-          automationActive: true,
-          formularioPreenchido: keepFormFilled,
-          diagnosticoFormularioId: keepFormId,
-          ultimaInteracao: new Date(),
-          ultimoEnvioIa: null,
-          proximoFollowupEm: null,
-          followupNivel: 0,
-          dadosBrutos: {
-            ...rawWithoutWf2,
-            wf2: {
-              resetByClearCommand: true,
-              resetAt,
-              previousStatus: String(lead.status || "").trim() || null,
-              keptFormularioId: keepFormId,
-            },
-          },
-        },
-      });
-      await tx.leadAutomacaoTimeline.create({
-        data: {
-          workflow,
-          leadId: lead.id,
-          tipo: "clear_reset",
-          etapa: "system",
-          direcao: "system",
-          mensagem: "Lead resetado via comando /clear.",
-          metadata: {
-            keptFormularioId: keepFormId,
-            previousStatus: String(lead.status || "").trim() || null,
-            timelineDeleted: Number(timelineDelete?.count || 0),
-            crmDeleted: Number(crmDelete?.count || 0),
-            analysesDeleted: Number(analysisDelete?.count || 0),
-          },
-        },
-      });
+    let transactionResult = null;
+    for (let attempt = 1; attempt <= CLEAR_RESET_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        transactionResult = await prisma.$transaction(
+          async (tx) => {
+            const txTables = getWorkflowTables(tx, workflow);
+            const timelineDelete = await tx.leadAutomacaoTimeline.deleteMany({
+              where: {
+                workflow,
+                leadId: lead.id,
+              },
+            });
+            const crmDelete = await tx.leadCrm.deleteMany({
+              where: {
+                workflow,
+                leadId: lead.id,
+              },
+            });
+            const analysisDelete = await tx.analiseMaturidade.deleteMany({
+              where: {
+                workflow,
+                leadId: lead.id,
+              },
+            });
+            const updatedLead = await txTables.lead.update({
+              where: { id: lead.id },
+              data: {
+                status: "NOVO_LEAD",
+                automationActive: true,
+                formularioPreenchido: keepFormFilled,
+                diagnosticoFormularioId: keepFormId,
+                ultimaInteracao: new Date(),
+                ultimoEnvioIa: null,
+                proximoFollowupEm: null,
+                followupNivel: 0,
+                dadosBrutos: {
+                  ...rawWithoutWf2,
+                  wf2: {
+                    resetByClearCommand: true,
+                    resetAt,
+                    previousStatus: String(lead.status || "").trim() || null,
+                    keptFormularioId: keepFormId,
+                  },
+                },
+              },
+            });
+            await tx.leadAutomacaoTimeline.create({
+              data: {
+                workflow,
+                leadId: lead.id,
+                tipo: "clear_reset",
+                etapa: "system",
+                direcao: "system",
+                mensagem: "Lead resetado via comando /clear.",
+                metadata: {
+                  keptFormularioId: keepFormId,
+                  previousStatus: String(lead.status || "").trim() || null,
+                  timelineDeleted: Number(timelineDelete?.count || 0),
+                  crmDeleted: Number(crmDelete?.count || 0),
+                  analysesDeleted: Number(analysisDelete?.count || 0),
+                },
+              },
+            });
 
-      return {
-        updatedLead,
-        timelineDeleted: Number(timelineDelete?.count || 0),
-        crmDeleted: Number(crmDelete?.count || 0),
-        analysesDeleted: Number(analysisDelete?.count || 0),
-      };
-    });
+            return {
+              updatedLead,
+              timelineDeleted: Number(timelineDelete?.count || 0),
+              crmDeleted: Number(crmDelete?.count || 0),
+              analysesDeleted: Number(analysisDelete?.count || 0),
+            };
+          },
+          CLEAR_RESET_TX_OPTIONS
+        );
+        break;
+      } catch (error) {
+        const canRetry =
+          attempt < CLEAR_RESET_MAX_ATTEMPTS && isPrismaInteractiveTxExpiredError(error);
+        if (!canRetry) {
+          throw error;
+        }
+        logOrchestrator("warn", "clear.reset.retry_after_tx_timeout", {
+          agentSlug: agent.slug,
+          workflow,
+          leadId: lead.id,
+          attempt,
+          maxAttempts: CLEAR_RESET_MAX_ATTEMPTS,
+          message: error?.message || "unknown",
+        });
+      }
+    }
 
     leadReset = {
       foundLead: true,
