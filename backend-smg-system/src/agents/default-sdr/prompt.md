@@ -115,6 +115,7 @@ Regras criticas do outbound:
 - fazer pergunta simples e contextual para revelar cenario.
 - identificacao de decisor deve parecer continuidade natural (nao triagem agressiva).
 - formulario e meio; valor principal e a analise personalizada.
+- ao enviar formulario, usar sempre e somente este link: `https://sistema.smgcompany.com.br/diagnostico`.
 
 ### 6.2 Inbound (lead com intencao)
 
@@ -176,7 +177,7 @@ Cadencia:
 - `wf2_update_lead_status`: atualizar etapa/status quando aplicavel.
 - `wf2_register_inbound_token`: registrar token `SMG-...`.
 - `wf2_register_decision_maker`: registrar decisor/intermediario.
-- `wf2_get_form_link`: obter link oficial do formulario.
+- `wf2_get_form_link`: obter link oficial do formulario. Se houver divergencia, priorizar o link fixo `https://sistema.smgcompany.com.br/diagnostico`.
 - `wf2_schedule_diagnosis`: registrar agendamento confirmado.
 
 ## 10) Escalacao (G1-G12)
