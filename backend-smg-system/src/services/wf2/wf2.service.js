@@ -1411,7 +1411,6 @@ async function registerInboundMessageEvent({
     tokenDetected: Boolean(token),
   });
   let lead = await findLeadByPhone(tables, phoneNumber, agentSlug);
-  let leadCreatedFromInboundMessage = false;
 
   if (token) {
     const tokenResult = await handleInboundToken({
@@ -1454,8 +1453,6 @@ async function registerInboundMessageEvent({
         reason: "lead_not_found",
       };
     }
-    leadCreatedFromInboundMessage = true;
-
     logWf2("info", "inbound.message.lead_created", {
       explanation:
         "Lead nao existia e foi criado automaticamente a partir da mensagem inbound.",
@@ -1531,6 +1528,9 @@ async function registerInboundMessageEvent({
   let leadForNextStep = updatedLead;
   let normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
   let linkedForm = null;
+  const recentlyCleared =
+    Boolean(leadForNextStep?.dadosBrutos?.wf2?.fullDataCleared) &&
+    normalizedStatus === "NOVO_LEAD";
 
   const currentFormId = textOrEmpty(leadForNextStep.diagnosticoFormularioId);
   if (currentFormId) {
@@ -1538,7 +1538,7 @@ async function registerInboundMessageEvent({
       where: { id: currentFormId },
     });
   }
-  if (!linkedForm) {
+  if (!linkedForm && !recentlyCleared) {
     linkedForm = await findLatestDiagnosticoByPhone(
       prisma,
       workflow,
@@ -1589,7 +1589,6 @@ async function registerInboundMessageEvent({
 
   const hasLinkedForm = Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId));
   const shouldSendInboundWelcomeForm =
-    leadCreatedFromInboundMessage &&
     !token &&
     !hasLinkedForm &&
     isInboundLead(leadForNextStep) &&

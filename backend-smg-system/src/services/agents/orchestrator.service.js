@@ -1266,12 +1266,15 @@ async function clearConversationAndPendingBuffer({
 
   if (lead) {
     const linkedFormId = textOrEmpty(lead.diagnosticoFormularioId) || null;
+    const phoneCandidates = buildPhoneCandidates(normalizedDestination);
     const formDeleteWhereOr = [];
     if (linkedFormId) {
       formDeleteWhereOr.push({ id: linkedFormId });
     }
-    if (normalizedDestination) {
-      formDeleteWhereOr.push({ telefone: normalizedDestination });
+    for (const candidate of phoneCandidates) {
+      const normalizedCandidate = textOrEmpty(candidate);
+      if (!normalizedCandidate) continue;
+      formDeleteWhereOr.push({ telefone: normalizedCandidate });
     }
     const resetAt = new Date().toISOString();
 
