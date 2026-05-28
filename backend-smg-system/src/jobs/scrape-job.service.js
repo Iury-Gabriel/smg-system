@@ -56,12 +56,6 @@ async function loadPresets(tables, requestedSegments = []) {
   });
 }
 
-async function resetBsbPresetStartOffsets(tables) {
-  await tables.preset.updateMany({
-    data: { startOffset: 0 },
-  });
-}
-
 async function collectLeadsFromPreset(preset, workflow) {
   if (preset.source === ScrapeSource.google_search) {
     return fetchGoogleSearchResults(preset, workflow);
@@ -142,15 +136,6 @@ async function runScrapeJob(jobData = {}) {
     });
 
     const activeSegments = await loadActiveSegmentsSet(tables);
-
-    if (workflow === WORKFLOW_BSB) {
-      await resetBsbPresetStartOffsets(tables);
-      logScrape("job.cursor.reset", {
-        executionId: execution.id,
-        workflow,
-        message: "Todos os presets BSB reiniciados com startOffset=0.",
-      });
-    }
 
     const presets = await loadPresets(tables, requestedSegments);
 
