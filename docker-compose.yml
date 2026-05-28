@@ -31,6 +31,8 @@ services:
   backend:
     build:
       context: ./backend-smg-system
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: smg-backend
     restart: unless-stopped
     env_file:

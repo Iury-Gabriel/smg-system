@@ -1599,6 +1599,22 @@ async function registerInboundMessageEvent({
     normalizedStatus === "NOVO_LEAD" &&
     !leadForNextStep.formularioPreenchido;
 
+  logWf2("info", "inbound.message.welcome_form_gate", {
+    explanation:
+      "Gate hardcoded para primeiro contato sem formulario: se true, WF2 envia boas-vindas + link e suprime IA.",
+    workflow,
+    leadId: leadForNextStep.id,
+    phoneNumber: leadForNextStep.telefone || phoneNumber || null,
+    status: normalizedStatus,
+    hasLinkedForm,
+    formularioPreenchido: Boolean(leadForNextStep.formularioPreenchido),
+    tokenDetected: Boolean(token),
+    recentlyCleared,
+    isEmptyNovoLead,
+    pipelineOrigin: textOrEmpty(leadForNextStep.pipelineOrigin) || null,
+    shouldSendInboundWelcomeForm,
+  });
+
   if (shouldSendInboundWelcomeForm) {
     const agent = await resolveAgentForLead(leadForNextStep);
     const immediateReplies = buildInboundWelcomeMessages({
@@ -1606,6 +1622,15 @@ async function registerInboundMessageEvent({
       agent,
     });
     const nowIso = new Date().toISOString();
+
+    logWf2("info", "inbound.message.welcome_form_sending", {
+      explanation:
+        "WF2 vai enviar mensagens imediatas de boas-vindas e link do formulario, sem chamar IA generativa.",
+      workflow,
+      leadId: leadForNextStep.id,
+      formLink: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK) || DEFAULT_WF2_FORM_LINK,
+      immediateReplies,
+    });
 
     leadForNextStep = await tables.lead.update({
       where: { id: leadForNextStep.id },

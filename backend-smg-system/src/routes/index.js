@@ -7,6 +7,7 @@ const agentsRoutes = require("./agents.routes");
 const wf2Routes = require("./wf2.routes");
 const integrationsRoutes = require("./integrations.routes");
 const { listWorkflowConfigs } = require("../config/workflows");
+const { buildSha } = require("../config/build-info");
 
 const router = express.Router();
 
@@ -14,6 +15,7 @@ router.get("/health", (req, res) => {
   res.json({
     success: true,
     message: "Scrap backend online",
+    buildSha,
     workflows: listWorkflowConfigs().map((workflow) => workflow.id),
     timestamp: new Date().toISOString(),
   });
