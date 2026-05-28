@@ -1244,10 +1244,12 @@ async function clearConversationAndPendingBuffer({
     agentSlug: agent.slug,
     conversationKey,
   });
+  const normalizedDestination =
+    normalizeE164(destination) || normalizePhone(destination) || textOrEmpty(destination);
 
   const lead = await findLeadForInboundContext({
     tables,
-    senderNumber: normalizeE164(destination) || destination,
+    senderNumber: normalizedDestination || destination,
     agentSlug: agent.slug,
   });
 
@@ -1258,16 +1260,19 @@ async function clearConversationAndPendingBuffer({
     timelineDeleted: 0,
     crmDeleted: 0,
     analysesDeleted: 0,
+    formsDeleted: 0,
+    tasksDeleted: 0,
   };
 
   if (lead) {
-    const keepFormId = textOrEmpty(lead.diagnosticoFormularioId) || null;
-    const keepFormFilled = Boolean(lead.formularioPreenchido || keepFormId);
-    const rawData =
-      lead.dadosBrutos && typeof lead.dadosBrutos === "object" && !Array.isArray(lead.dadosBrutos)
-        ? lead.dadosBrutos
-        : {};
-    const { wf2: _wf2, ...rawWithoutWf2 } = rawData;
+    const linkedFormId = textOrEmpty(lead.diagnosticoFormularioId) || null;
+    const formDeleteWhereOr = [];
+    if (linkedFormId) {
+      formDeleteWhereOr.push({ id: linkedFormId });
+    }
+    if (normalizedDestination) {
+      formDeleteWhereOr.push({ telefone: normalizedDestination });
+    }
     const resetAt = new Date().toISOString();
 
     let transactionResult = null;
@@ -1294,42 +1299,38 @@ async function clearConversationAndPendingBuffer({
                 leadId: lead.id,
               },
             });
+            const formDelete = formDeleteWhereOr.length
+              ? await tx.leadDiagnostico.deleteMany({
+                  where: {
+                    workflow,
+                    OR: formDeleteWhereOr,
+                  },
+                })
+              : { count: 0 };
+            const tasksDelete = await tx.taskComercial.deleteMany({
+              where: {
+                workflow,
+                leadId: lead.id,
+              },
+            });
             const updatedLead = await txTables.lead.update({
               where: { id: lead.id },
               data: {
                 status: "NOVO_LEAD",
                 automationActive: true,
-                formularioPreenchido: keepFormFilled,
-                diagnosticoFormularioId: keepFormId,
+                formularioPreenchido: false,
+                diagnosticoFormularioId: null,
                 ultimaInteracao: new Date(),
                 ultimoEnvioIa: null,
                 proximoFollowupEm: null,
                 followupNivel: 0,
                 dadosBrutos: {
-                  ...rawWithoutWf2,
                   wf2: {
                     resetByClearCommand: true,
                     resetAt,
                     previousStatus: String(lead.status || "").trim() || null,
-                    keptFormularioId: keepFormId,
+                    fullDataCleared: true,
                   },
-                },
-              },
-            });
-            await tx.leadAutomacaoTimeline.create({
-              data: {
-                workflow,
-                leadId: lead.id,
-                tipo: "clear_reset",
-                etapa: "system",
-                direcao: "system",
-                mensagem: "Lead resetado via comando /clear.",
-                metadata: {
-                  keptFormularioId: keepFormId,
-                  previousStatus: String(lead.status || "").trim() || null,
-                  timelineDeleted: Number(timelineDelete?.count || 0),
-                  crmDeleted: Number(crmDelete?.count || 0),
-                  analysesDeleted: Number(analysisDelete?.count || 0),
                 },
               },
             });
@@ -1339,6 +1340,8 @@ async function clearConversationAndPendingBuffer({
               timelineDeleted: Number(timelineDelete?.count || 0),
               crmDeleted: Number(crmDelete?.count || 0),
               analysesDeleted: Number(analysisDelete?.count || 0),
+              formsDeleted: Number(formDelete?.count || 0),
+              tasksDeleted: Number(tasksDelete?.count || 0),
             };
           },
           CLEAR_RESET_TX_OPTIONS
@@ -1368,6 +1371,8 @@ async function clearConversationAndPendingBuffer({
       timelineDeleted: Number(transactionResult?.timelineDeleted || 0),
       crmDeleted: Number(transactionResult?.crmDeleted || 0),
       analysesDeleted: Number(transactionResult?.analysesDeleted || 0),
+      formsDeleted: Number(transactionResult?.formsDeleted || 0),
+      tasksDeleted: Number(transactionResult?.tasksDeleted || 0),
     };
   }
 
@@ -1375,7 +1380,7 @@ async function clearConversationAndPendingBuffer({
     agent,
     provider,
     to: destination,
-    text: "Pronto. Limpei o historico, removi o contexto de diagnostico e reiniciei seu lead. O formulario foi mantido.",
+    text: "Pronto. Apaguei historico, formulario, agendamentos e todo o contexto do seu lead.",
   });
 
   return {
@@ -1518,6 +1523,8 @@ async function queueInboundForOrchestrator({
           timelineDeleted: Number(clearResult?.leadReset?.timelineDeleted || 0),
           crmDeleted: Number(clearResult?.leadReset?.crmDeleted || 0),
           analysesDeleted: Number(clearResult?.leadReset?.analysesDeleted || 0),
+          formsDeleted: Number(clearResult?.leadReset?.formsDeleted || 0),
+          tasksDeleted: Number(clearResult?.leadReset?.tasksDeleted || 0),
         },
       },
     });
