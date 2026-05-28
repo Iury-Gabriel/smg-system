@@ -43,6 +43,14 @@ function isInsideIcp(segment, activeSegments) {
   return activeSegments.has(segment);
 }
 
+function isLikelyValidEmail(value) {
+  const email = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!email) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
 function buildLeadLogContext(lead) {
   return {
     nome: lead?.nome || null,
@@ -243,29 +251,9 @@ async function validateAndInsertLead({
   const requiresPhone = workflowId !== WORKFLOW_BSB;
   const websiteInspection = enrichedRawLead.websiteInspection || null;
 
-  // --- BSB: unico filtro obrigatorio é email personalizado + segmento ativo + sem duplicata ---
+  // --- BSB: unico filtro obrigatorio é email valido + DDD 11 + sem duplicata ---
   if (workflowId === WORKFLOW_BSB) {
-    const GENERIC_EMAIL_DOMAINS = [
-      "gmail.com",
-      "hotmail.com",
-      "outlook.com",
-      "yahoo.com",
-      "yahoo.com.br",
-      "live.com",
-      "msn.com",
-      "aol.com",
-      "icloud.com",
-      "mail.com",
-      "protonmail.com",
-      "uol.com.br",
-      "bol.com.br",
-      "terra.com.br",
-      "ig.com.br",
-      "globo.com",
-      "zipmail.com.br",
-    ];
-
-    if (!lead.email) {
+    if (!isLikelyValidEmail(lead.email)) {
       await registerDiscard({
         tables,
         fonte: lead.fonte,
@@ -273,7 +261,7 @@ async function validateAndInsertLead({
         telefoneTentativo: lead.telefone,
         segmentoTentativo: String(lead.segmento),
         dadosBrutos: rawLead,
-        mensagem: "LDR BSB exige email personalizado para entrega do lead.",
+        mensagem: "LDR BSB exige email valido.",
       });
       return {
         approved: false,
@@ -282,37 +270,36 @@ async function validateAndInsertLead({
       };
     }
 
-    const emailDomain = (lead.email.split("@")[1] || "").toLowerCase().trim();
-    if (GENERIC_EMAIL_DOMAINS.includes(emailDomain)) {
+    if (!lead.telefone) {
       await registerDiscard({
         tables,
         fonte: lead.fonte,
-        motivoDescarte: DiscardReason.sem_email,
-        telefoneTentativo: lead.telefone,
+        motivoDescarte: DiscardReason.sem_telefone,
+        telefoneTentativo: rawLead.telefoneBruto || "",
         segmentoTentativo: String(lead.segmento),
         dadosBrutos: rawLead,
-        mensagem: `LDR BSB exige email personalizado. Dominio generico detectado: ${emailDomain}`,
+        mensagem: "LDR BSB exige telefone com DDD 11.",
       });
       return {
         approved: false,
-        reason: DiscardReason.sem_email,
+        reason: DiscardReason.sem_telefone,
         lead: buildLeadLogContext(lead),
       };
     }
 
-    if (!isInsideIcp(lead.segmento, activeSegments)) {
+    if (!isPhoneWithAreaCode(lead.telefone, "11")) {
       await registerDiscard({
         tables,
         fonte: lead.fonte,
-        motivoDescarte: DiscardReason.fora_do_icp,
+        motivoDescarte: DiscardReason.telefone_formato_invalido,
         telefoneTentativo: lead.telefone,
         segmentoTentativo: String(lead.segmento),
         dadosBrutos: rawLead,
-        mensagem: "Segmento fora da configuracao ativa de ICP.",
+        mensagem: "LDR BSB exige telefone com DDD 11.",
       });
       return {
         approved: false,
-        reason: DiscardReason.fora_do_icp,
+        reason: DiscardReason.telefone_formato_invalido,
         lead: buildLeadLogContext(lead),
       };
     }
@@ -338,6 +325,51 @@ async function validateAndInsertLead({
           lead: buildLeadLogContext(lead),
         };
       }
+    }
+
+    const byPhone = await tables.lead.findUnique({
+      where: { telefone: lead.telefone },
+      select: { id: true },
+    });
+    if (byPhone) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.duplicata_telefone,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "Telefone ja existe em leads_automacao para workflow BSB.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.duplicata_telefone,
+        lead: buildLeadLogContext(lead),
+      };
+    }
+
+    const byCompanySegment = await tables.lead.findFirst({
+      where: {
+        empresa: lead.empresa,
+        segmento: lead.segmento,
+      },
+      select: { id: true },
+    });
+    if (byCompanySegment) {
+      await registerDiscard({
+        tables,
+        fonte: lead.fonte,
+        motivoDescarte: DiscardReason.duplicata_empresa_segmento,
+        telefoneTentativo: lead.telefone,
+        segmentoTentativo: String(lead.segmento),
+        dadosBrutos: rawLead,
+        mensagem: "Empresa + segmento ja existem em leads_automacao para workflow BSB.",
+      });
+      return {
+        approved: false,
+        reason: DiscardReason.duplicata_empresa_segmento,
+        lead: buildLeadLogContext(lead),
+      };
     }
 
     const created = await tables.lead.create({
