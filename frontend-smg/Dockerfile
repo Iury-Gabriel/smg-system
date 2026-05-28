@@ -7,7 +7,7 @@ RUN npm ci
 
 COPY . .
 
-ARG VITE_SMG_API_URL=/api
+ARG VITE_SMG_API_URL=https://api-smg.iurygabriel.xyz/api
 ENV VITE_SMG_API_URL=$VITE_SMG_API_URL
 
 RUN npm run build

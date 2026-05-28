@@ -58,7 +58,7 @@ services:
     build:
       context: ./frontend-smg
       args:
-        VITE_SMG_API_URL: /api
+        VITE_SMG_API_URL: ${VITE_SMG_API_URL:-https://api-smg.iurygabriel.xyz/api}
     container_name: smg-frontend
     restart: unless-stopped
     depends_on:
