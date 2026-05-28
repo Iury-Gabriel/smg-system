@@ -1560,6 +1560,9 @@ async function queueInboundForOrchestrator({
         suppressAi: Boolean(wf2Result?.suppressAi),
         reason: wf2Result?.reason || null,
         immediateReply: textOrEmpty(wf2Result?.immediateReply).slice(0, 300),
+        immediateRepliesCount: Array.isArray(wf2Result?.immediateReplies)
+          ? wf2Result.immediateReplies.length
+          : 0,
       }),
     });
 
@@ -1575,7 +1578,21 @@ async function queueInboundForOrchestrator({
     });
 
     if (wf2Result?.suppressAi) {
-      if (textOrEmpty(wf2Result.immediateReply)) {
+      const immediateReplies = Array.isArray(wf2Result?.immediateReplies)
+        ? wf2Result.immediateReplies
+        : [];
+      if (immediateReplies.length) {
+        for (const replyText of immediateReplies) {
+          const normalizedReply = textOrEmpty(replyText);
+          if (!normalizedReply) continue;
+          await sendTextByProvider({
+            agent,
+            provider: inboundProvider,
+            to: senderNumber,
+            text: normalizedReply,
+          });
+        }
+      } else if (textOrEmpty(wf2Result.immediateReply)) {
         await sendTextByProvider({
           agent,
           provider: inboundProvider,
@@ -1592,6 +1609,7 @@ async function queueInboundForOrchestrator({
         payload: {
           reason: wf2Result.reason || "wf2_suppressed_ai",
           immediateReply: Boolean(textOrEmpty(wf2Result.immediateReply)),
+          immediateRepliesCount: immediateReplies.length,
         },
       });
 

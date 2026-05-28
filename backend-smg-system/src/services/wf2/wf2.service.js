@@ -66,6 +66,11 @@ const START_SEGMENT_ALIASES = {
   arquitetura: "arquitetura",
   outro: "outro",
 };
+const DEFAULT_WF2_FORM_LINK = "https://smg.com.br/diagnostico";
+const INBOUND_WELCOME_TEMPLATE =
+  "Oi {nome}, tudo bem? Eu sou a Clara, consultora virtual da SMG. Vou te acompanhar por aqui para montar seu diagnostico operacional.";
+const INBOUND_FORM_LINK_TEMPLATE =
+  "Para comecarmos, preencha esse formulario rapido para eu personalizar sua analise:\n{form_link}";
 
 function logWf2(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -877,29 +882,28 @@ async function processAnalysisForLead({
       );
     }
 
-    const deliveryCopy = await generateAnalysisDeliveryMessages({
-      workflow,
+    const firstName = toShortFirstName(currentLead?.nome || "");
+    const companyName = textOrEmpty(currentLead?.empresa || "sua empresa");
+    const ackText = `Recebi suas respostas aqui, ${firstName}. To preparando a analise da ${companyName}, te mando ainda hoje.`;
+    const introText = `${firstName}, aqui esta sua Analise de Maturidade da ${companyName}`;
+    const followupText = buildAnalysisInsightMessage({
       lead: currentLead,
       form,
-    });
-    logWf2("info", "analysis.delivery_copy.generated", {
-      explanation:
-        "Mensagens de introducao/follow-up da analise geradas por IA para envio no WhatsApp.",
-      workflow,
-      leadId: currentLead.id,
-      model: deliveryCopy.model,
-      usedFallback: Boolean(deliveryCopy.usedFallback),
-      hadRepairPass: Boolean(deliveryCopy.hadRepairPass),
-      usedHardFallback: Boolean(deliveryCopy.usedHardFallback),
-      introPreview: textOrEmpty(deliveryCopy.introText).slice(0, 200),
-      followupPreview: textOrEmpty(deliveryCopy.followupText).slice(0, 200),
     });
 
     await sendLeadText({
       agent,
       provider,
       lead: currentLead,
-      text: deliveryCopy.introText,
+      text: ackText,
+    });
+    await waitAnalysisSequenceDelay();
+
+    await sendLeadText({
+      agent,
+      provider,
+      lead: currentLead,
+      text: introText,
     });
     await waitAnalysisSequenceDelay();
 
@@ -908,7 +912,7 @@ async function processAnalysisForLead({
       provider,
       lead: currentLead,
       documentUrl: file.publicUrl,
-      caption: "Sua An\u00e1lise de Maturidade Operacional da SMG.",
+      caption: `Analise de Maturidade da ${companyName}`,
       filename: file.filename,
     });
     await waitAnalysisSequenceDelay();
@@ -917,8 +921,7 @@ async function processAnalysisForLead({
       agent,
       provider,
       lead: currentLead,
-      text: deliveryCopy.followupText,
-      forceTemplateName: textOrEmpty(agent?.providers?.meta?.templates?.analiseFollowup),
+      text: followupText,
     });
 
     const now = new Date();
@@ -1269,6 +1272,44 @@ function normalizeInboundProfileName(profileName) {
   return normalized;
 }
 
+function toShortFirstName(fullName = "") {
+  const normalized = textOrEmpty(fullName).replace(/\s+/g, " ").trim();
+  if (!normalized) return "tudo bem";
+  const first = normalized.split(" ")[0] || "";
+  if (!first) return "tudo bem";
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
+
+function buildInboundWelcomeMessages({ lead, agent }) {
+  const firstName = toShortFirstName(lead?.nome || "");
+  const formLink = textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK) || DEFAULT_WF2_FORM_LINK;
+  const welcomeText = INBOUND_WELCOME_TEMPLATE.replace("{nome}", firstName);
+  const formLinkText = INBOUND_FORM_LINK_TEMPLATE.replace("{form_link}", formLink);
+  return [welcomeText, formLinkText];
+}
+
+function buildAnalysisInsightMessage({ lead, form }) {
+  const challenge = textOrEmpty(form?.maiorDesafio || form?.descricaoOperacao || "");
+  const urgency = textOrEmpty(form?.urgencia || "");
+  const tools = textOrEmpty(form?.ferramentas || "");
+  const fallback =
+    "Identifiquei dois pontos importantes: existe espaco para melhorar a previsibilidade da operacao e reduzir perdas silenciosas no dia a dia.";
+
+  let primaryInsight = fallback;
+  if (challenge) {
+    primaryInsight = `Identifiquei um ponto que se destaca: ${clipText(challenge, 180)}.`;
+  } else if (urgency) {
+    primaryInsight = `Pelo nivel de urgencia (${urgency}), vale priorizar ajustes de processo que tragam ganho rapido sem aumentar retrabalho.`;
+  }
+
+  let secondaryInsight = "";
+  if (tools) {
+    secondaryInsight = ` Pelo uso atual de ${clipText(tools, 80)}, tambem vejo oportunidade de padronizar o acompanhamento para ganhar consistencia.`;
+  }
+
+  return `${primaryInsight}${secondaryInsight} Conseguiu abrir o arquivo ai? Me confirma pra eu te explicar com mais profundidade.`;
+}
+
 function buildInboundCompanyName(phoneNumber) {
   const digits = String(phoneNumber || "").replace(/[^\d]/g, "");
   if (!digits) return `Lead Inbound ${crypto.randomUUID().slice(0, 8)}`;
@@ -1370,6 +1411,7 @@ async function registerInboundMessageEvent({
     tokenDetected: Boolean(token),
   });
   let lead = await findLeadByPhone(tables, phoneNumber, agentSlug);
+  let leadCreatedFromInboundMessage = false;
 
   if (token) {
     const tokenResult = await handleInboundToken({
@@ -1412,6 +1454,7 @@ async function registerInboundMessageEvent({
         reason: "lead_not_found",
       };
     }
+    leadCreatedFromInboundMessage = true;
 
     logWf2("info", "inbound.message.lead_created", {
       explanation:
@@ -1545,6 +1588,56 @@ async function registerInboundMessageEvent({
   }
 
   const hasLinkedForm = Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId));
+  const shouldSendInboundWelcomeForm =
+    leadCreatedFromInboundMessage &&
+    !token &&
+    !hasLinkedForm &&
+    isInboundLead(leadForNextStep) &&
+    normalizedStatus === "NOVO_LEAD";
+
+  if (shouldSendInboundWelcomeForm) {
+    const agent = await resolveAgentForLead(leadForNextStep);
+    const immediateReplies = buildInboundWelcomeMessages({
+      lead: leadForNextStep,
+      agent,
+    });
+    const nowIso = new Date().toISOString();
+
+    leadForNextStep = await tables.lead.update({
+      where: { id: leadForNextStep.id },
+      data: {
+        status: "FORMULARIO_ENVIADO",
+        dadosBrutos: mergeDadosBrutos(leadForNextStep.dadosBrutos, {
+          wf2: {
+            inboundWelcomeFormSentAt: nowIso,
+            formLinkSentAt: nowIso,
+          },
+        }),
+      },
+    });
+    normalizedStatus = "FORMULARIO_ENVIADO";
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: leadForNextStep.id,
+      tipo: "inbound_formulario_enviado",
+      etapa: "etapa5",
+      direcao: "outbound",
+      mensagem: "Mensagem de boas-vindas inbound enviada com link do formulario.",
+      metadata: {
+        immediateRepliesCount: immediateReplies.length,
+      },
+    });
+
+    return {
+      foundLead: true,
+      suppressAi: true,
+      reason: "inbound_welcome_form_sent",
+      immediateReplies,
+      lead: leadForNextStep,
+    };
+  }
+
   const shouldAutoAdvanceFromInbound =
     hasLinkedForm &&
     isInboundLead(leadForNextStep) &&
@@ -2003,7 +2096,7 @@ async function createDiagnosticoFromPayload({
         email: textOrEmpty(leadPayload.email || payload.email) || null,
         fonteOrigem: ScrapeSource.manual,
         agentSlug: textOrEmpty(leadPayload.agentSlug || "default-sdr"),
-        status: "FORMULARIO_ENVIADO",
+        status: "FORMULARIO_RESPONDIDO",
         pipelineOrigin: textOrEmpty(leadPayload.pipelineOrigin || "diagnostico_site"),
         canalAquisicao: textOrEmpty(leadPayload.canalAquisicao || "inbound_site"),
         automationActive: true,
@@ -2021,7 +2114,7 @@ async function createDiagnosticoFromPayload({
     lead = await tables.lead.update({
       where: { id: lead.id },
       data: {
-        status: "FORMULARIO_ENVIADO",
+        status: "FORMULARIO_RESPONDIDO",
         pipelineOrigin: textOrEmpty(leadPayload.pipelineOrigin || "diagnostico_site"),
         canalAquisicao: textOrEmpty(leadPayload.canalAquisicao || "inbound_site"),
         formularioPreenchido: true,
@@ -2040,18 +2133,42 @@ async function createDiagnosticoFromPayload({
   await appendTimeline(prisma, {
     workflow,
     leadId: lead.id,
-    tipo: "formulario_enviado",
+    tipo: "formulario_respondido",
     etapa: "etapa5",
     direcao: "system",
-    mensagem: "Formulario inbound registrado para o lead.",
+    mensagem: "Formulario inbound registrado e lead pronto para envio da analise.",
     metadata: { token: normalizedToken, formId: form.id },
   });
+
+  let analysisResult = null;
+  try {
+    const agent = await resolveAgentForLead(lead);
+    analysisResult = await processAnalysisForLead({
+      workflow,
+      agent,
+      provider: agent.defaultProvider,
+      prisma,
+      tables,
+      lead,
+      config: await ensureWorkflowConfigRows(prisma, workflow),
+    });
+  } catch (error) {
+    logWf2("error", "forms.analysis.trigger_failed", {
+      explanation:
+        "Formulario foi registrado, mas houve falha ao disparar automaticamente a analise para o lead.",
+      workflow,
+      leadId: lead.id,
+      message: error?.message || "unknown",
+    });
+  }
 
   return {
     workflow,
     token: normalizedToken,
     formId: form.id,
     lead: leadSummary(lead),
+    analysisTriggered: Boolean(analysisResult?.processed),
+    analysisReason: analysisResult?.reason || null,
   };
 }
 
