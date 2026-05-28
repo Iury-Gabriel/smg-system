@@ -67,6 +67,7 @@ const START_SEGMENT_ALIASES = {
   outro: "outro",
 };
 const DEFAULT_WF2_FORM_LINK = "https://sistema.smgcompany.com.br/diagnostico";
+const LEGACY_WF2_FORM_LINK = "https://smg.com.br/diagnostico";
 const INBOUND_WELCOME_TEMPLATE =
   "Oi {nome}, tudo bem? Eu sou a Clara, consultora virtual da SMG. Vou te acompanhar por aqui para montar seu diagnostico operacional.";
 const INBOUND_FORM_LINK_TEMPLATE =
@@ -1025,7 +1026,7 @@ async function processNewOutboundLead({
     "Oi {nome}, tudo bem? Sou da SMG e analisamos operacoes do segmento de {segmento} para identificar ganhos rapidos de eficiencia. Posso te fazer uma pergunta curta sobre sua rotina hoje?"
   );
   const message = applyTemplateVariables(template, lead, {
-    form_link: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK),
+    form_link: resolveWf2FormLink(agent?.formLink),
   });
 
   await sendLeadText({
@@ -1129,7 +1130,7 @@ async function processLeadFollowup({
     defaultTextByStage[stageKey]
   );
   const message = applyTemplateVariables(templateText, lead, {
-    form_link: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK),
+    form_link: resolveWf2FormLink(agent?.formLink),
   });
 
   const templateByStage = {
@@ -1280,9 +1281,15 @@ function toShortFirstName(fullName = "") {
   return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
+function resolveWf2FormLink(value = "") {
+  const raw = textOrEmpty(value).replace(/\/+$/, "");
+  if (!raw || raw === LEGACY_WF2_FORM_LINK) return DEFAULT_WF2_FORM_LINK;
+  return raw;
+}
+
 function buildInboundWelcomeMessages({ lead, agent }) {
   const firstName = toShortFirstName(lead?.nome || "");
-  const formLink = textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK) || DEFAULT_WF2_FORM_LINK;
+  const formLink = resolveWf2FormLink(agent?.formLink);
   const welcomeText = INBOUND_WELCOME_TEMPLATE.replace("{nome}", firstName);
   const formLinkText = INBOUND_FORM_LINK_TEMPLATE.replace("{form_link}", formLink);
   return [welcomeText, formLinkText];
@@ -1628,7 +1635,7 @@ async function registerInboundMessageEvent({
         "WF2 vai enviar mensagens imediatas de boas-vindas e link do formulario, sem chamar IA generativa.",
       workflow,
       leadId: leadForNextStep.id,
-      formLink: textOrEmpty(agent?.formLink || DEFAULT_WF2_FORM_LINK) || DEFAULT_WF2_FORM_LINK,
+      formLink: resolveWf2FormLink(agent?.formLink),
       immediateReplies,
     });
 

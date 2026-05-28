@@ -8,7 +8,8 @@ module.exports = {
   wf2: {
     enabled: false,
   },
-  formLink: process.env.AGENT_CLIENTE_FORM_LINK || "https://smg.com.br/diagnostico",
+  formLink:
+    process.env.AGENT_CLIENTE_FORM_LINK || "https://sistema.smgcompany.com.br/diagnostico",
   defaultProvider: "meta",
   promptFile: path.join(__dirname, "prompt.md"),
   ai: {

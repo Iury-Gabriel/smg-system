@@ -10,7 +10,7 @@ qualquer análise ou agendamento. BANT e SPIN não operam no vazio. Operam sobre
 dados que o lead já forneceu, aprofundando o que é relevante, implicando o que é 
 estratégico e conduzindo para o diagnóstico com contexto real. 
 A sequência invariável é: 
-Etapa 1 — Formulário preenchido. Via site (smg.com.br/diagnostico) ou via 
+Etapa 1 — Formulário preenchido. Via site (sistema.smgcompany.com.br/diagnostico) ou via 
 WhatsApp quando o lead resiste ao link. Sem formulário completo, não há análise. Sem 
 análise, não há agendamento. 
 Etapa 2 — Análise de Maturidade gerada e entregue. Com base nos dados do formulário 

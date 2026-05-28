@@ -137,6 +137,13 @@ interface ScrapeExecutionSummary {
   details: Record<string, unknown> | null
 }
 
+interface SearchPresetSummary {
+  id: string
+  name: string
+  startOffset: number
+  isActive: boolean
+}
+
 interface WorkflowLeadSummary {
   id: string
   nome: string
@@ -489,6 +496,9 @@ export default function App() {
   const [manualScrapeWorkflow, setManualScrapeWorkflow] = useState<WorkflowKey | ''>('')
   const [manualScrapeMessage, setManualScrapeMessage] = useState('')
   const [manualScrapeError, setManualScrapeError] = useState('')
+  const [smgResetOffsetsLoading, setSmgResetOffsetsLoading] = useState(false)
+  const [smgResetOffsetsMessage, setSmgResetOffsetsMessage] = useState('')
+  const [smgResetOffsetsError, setSmgResetOffsetsError] = useState('')
   const [bsbDispatchRunning, setBsbDispatchRunning] = useState(false)
   const [bsbDispatchMessage, setBsbDispatchMessage] = useState('')
   const [bsbDispatchError, setBsbDispatchError] = useState('')
@@ -623,6 +633,44 @@ export default function App() {
 
   const handleRunSelectedWorkflowScrape = async () => {
     await handleManualScrape(selectedWorkflow)
+  }
+
+  const handleResetSmgStartOffset = async () => {
+    if (smgResetOffsetsLoading) return
+
+    setSmgResetOffsetsLoading(true)
+    setSmgResetOffsetsMessage('')
+    setSmgResetOffsetsError('')
+
+    try {
+      const presets = await apiRequest<SearchPresetSummary[]>('/config/presets?workflow=smg')
+      const presetIds = presets.map((preset) => String(preset.id || '').trim()).filter(Boolean)
+
+      if (!presetIds.length) {
+        setSmgResetOffsetsMessage('Nenhum preset SMG encontrado para resetar.')
+        return
+      }
+
+      await Promise.all(
+        presetIds.map((presetId) =>
+          apiRequest(`/config/presets/${presetId}/start?workflow=smg`, {
+            method: 'PATCH',
+            body: { startOffset: 0 },
+          })
+        )
+      )
+
+      setSmgResetOffsetsMessage(`StartOffset da SMG zerado com sucesso em ${presetIds.length} preset(s).`)
+      if (selectedWorkflow === 'smg') {
+        setScrapeRefreshToken((value) => value + 1)
+      }
+    } catch (requestError) {
+      setSmgResetOffsetsError(
+        requestError instanceof Error ? requestError.message : 'Erro ao zerar startOffset da SMG'
+      )
+    } finally {
+      setSmgResetOffsetsLoading(false)
+    }
   }
 
   const handleDispatchBsbLeads = async () => {
@@ -1502,6 +1550,16 @@ export default function App() {
                       ? `Rodando ${selectedWorkflow.toUpperCase()}...`
                       : `Rodar scrap agora (${selectedWorkflow.toUpperCase()})`}
                   </button>
+                  {selectedWorkflow === 'smg' ? (
+                    <button
+                      type="button"
+                      className="tab"
+                      onClick={handleResetSmgStartOffset}
+                      disabled={smgResetOffsetsLoading}
+                    >
+                      {smgResetOffsetsLoading ? 'Zerando startOffset SMG...' : 'Zerar startOffset SMG'}
+                    </button>
+                  ) : null}
                   {selectedWorkflow === 'bsb' ? (
                     <button
                       type="button"
@@ -1547,6 +1605,8 @@ export default function App() {
             {scrapeError ? <div className="error-banner">{scrapeError}</div> : null}
             {manualScrapeError ? <div className="error-banner">{manualScrapeError}</div> : null}
             {manualScrapeMessage ? <div className="success-banner">{manualScrapeMessage}</div> : null}
+            {smgResetOffsetsError ? <div className="error-banner">{smgResetOffsetsError}</div> : null}
+            {smgResetOffsetsMessage ? <div className="success-banner">{smgResetOffsetsMessage}</div> : null}
             {bsbDispatchError ? <div className="error-banner">{bsbDispatchError}</div> : null}
             {bsbDispatchMessage ? <div className="success-banner">{bsbDispatchMessage}</div> : null}
             <p className="muted">
