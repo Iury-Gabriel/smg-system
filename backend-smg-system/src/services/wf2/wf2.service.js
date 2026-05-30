@@ -2022,6 +2022,38 @@ async function registerInboundMessageEvent({
     });
   }
 
+  if (normalizedStatus === "DIAGNOSTICO_AGENDADO") {
+    const immediateReply = await rewriteWf2TextWithAi({
+      text:
+        "Seu diagnostico ja esta agendado com nosso time. Se quiser remarcar ou cancelar, me avise que eu aciono o especialista para ajustar.",
+      workflow,
+      lead: leadForNextStep,
+      purpose: "inbound_after_scheduled_diagnosis",
+      maxChars: 260,
+    });
+
+    await appendTimeline(prisma, {
+      workflow,
+      leadId: leadForNextStep.id,
+      tipo: "inbound_pos_agendamento",
+      etapa: "etapa8",
+      direcao: "system",
+      mensagem:
+        "Mensagem inbound recebida com lead ja agendado. IA suprimida para evitar tentativa de novo agendamento.",
+      metadata: {
+        inboundText: clipText(messageText, 240),
+      },
+    });
+
+    return {
+      foundLead: true,
+      suppressAi: true,
+      reason: "already_scheduled",
+      immediateReply,
+      lead: leadForNextStep,
+    };
+  }
+
   const hasLinkedForm = Boolean(textOrEmpty(leadForNextStep.diagnosticoFormularioId));
   const shouldSendInboundWelcomeForm =
     !token &&

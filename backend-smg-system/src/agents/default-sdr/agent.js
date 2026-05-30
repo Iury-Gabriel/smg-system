@@ -688,13 +688,28 @@ module.exports = {
           }
 
           const wf2 = lead?.dadosBrutos?.wf2 || {};
+          const leadStatus = String(lead.status || "").toUpperCase();
+          if (leadStatus === "DIAGNOSTICO_AGENDADO") {
+            const scheduledAtIso = String(wf2?.diagnosisScheduledAt || "").trim() || null;
+            log("info", "wf2.schedule.already_scheduled", {
+              leadId: lead.id,
+              scheduledAtIso,
+            });
+            return {
+              ok: true,
+              alreadyScheduled: true,
+              message: "Diagnostico ja estava agendado para este lead.",
+              lead: buildLeadSummary(lead),
+              scheduledAtIso,
+            };
+          }
           const readConfirmed = Boolean(wf2.analysisReadConfirmedAt);
           const waitingRead = Boolean(wf2.analysisAwaitingReadConfirmation);
           const postReadCount = Number(wf2.analysisPostReadInteractionCount || 0);
-          if (String(lead.status || "").toUpperCase() !== "ANALISE_ENVIADA") {
+          if (leadStatus !== "ANALISE_ENVIADA") {
             log("warn", "wf2.schedule.blocked.invalid_status", {
               leadId: lead.id,
-              status: String(lead.status || "").toUpperCase(),
+              status: leadStatus,
             });
             return {
               ok: false,
