@@ -139,6 +139,84 @@ function sanitizeScheduleOfferingByNextAction({ text = "", nextAction = "" }) {
   return "Entendi. Antes de falarmos de agenda, quero aprofundar mais um ponto rapido para te orientar melhor.";
 }
 
+function normalizeForComparison(text = "") {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeForSimilarity(text = "") {
+  return normalizeForComparison(text)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+function textSimilarityScore(a = "", b = "") {
+  const setA = new Set(tokenizeForSimilarity(a));
+  const setB = new Set(tokenizeForSimilarity(b));
+  if (!setA.size || !setB.size) return 0;
+  let intersection = 0;
+  for (const token of setA) {
+    if (setB.has(token)) intersection += 1;
+  }
+  return intersection / Math.max(setA.size, setB.size);
+}
+
+function extractLastQuestion(text = "") {
+  const parts = String(text || "")
+    .split("?")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!parts.length) return "";
+  return normalizeForComparison(parts[parts.length - 1]);
+}
+
+function sanitizeDuplicateReplyByHistory({ text = "", historyItems = [], nextAction = "" }) {
+  const safeText = textOrEmpty(text);
+  if (!safeText) return safeText;
+
+  const assistantMessages = (Array.isArray(historyItems) ? historyItems : [])
+    .filter((item) => item?.role === "ai")
+    .map((item) => textOrEmpty(item?.content))
+    .filter(Boolean)
+    .slice(-3);
+
+  if (!assistantMessages.length) return safeText;
+
+  const normalizedCurrent = normalizeForComparison(safeText);
+  const currentQuestion = extractLastQuestion(safeText);
+
+  const hasHighSimilarity = assistantMessages.some((previous) => {
+    const normalizedPrevious = normalizeForComparison(previous);
+    if (!normalizedPrevious) return false;
+    if (normalizedCurrent === normalizedPrevious) return true;
+    const similarity = textSimilarityScore(safeText, previous);
+    return similarity >= 0.82;
+  });
+
+  const repeatedQuestion = Boolean(currentQuestion)
+    ? assistantMessages.some((previous) => extractLastQuestion(previous) === currentQuestion)
+    : false;
+
+  if (!hasHighSimilarity && !repeatedQuestion) {
+    return safeText;
+  }
+
+  const action = String(nextAction || "").trim();
+  if (action === "pedir_permissao_para_enviar_horarios") {
+    return "Faz sentido. Posso te mandar duas opcoes de horario para voce escolher?";
+  }
+  if (action === "converter_para_diagnostico_com_2_horarios") {
+    return "Perfeito. Tenho dois horarios em dias diferentes para facilitar sua escolha. Quer que eu te passe agora?";
+  }
+  return "Perfeito, e um ponto importante. Pra aprofundar por outro angulo: hoje, qual impacto disso nas decisoes da sua proxima semana?";
+}
+
 function isClearMemoryCommand(value = "") {
   const normalized = textOrEmpty(value).trim().toLowerCase();
   if (!normalized) return false;
@@ -291,9 +369,9 @@ function mapWf2OperationalContext(lead = null) {
     nextAction = "confirmar_leitura_da_analise_sem_reapresentacao";
   } else if (status === "ANALISE_ENVIADA") {
     const count = Number(analysis.post_read_interaction_count || 0);
-    if (count < 2) {
+    if (count < 4) {
       nextAction = "aprofundar_antes_de_agendar_sem_horarios";
-    } else if (count < 3) {
+    } else if (count < 5) {
       nextAction = "pedir_permissao_para_enviar_horarios";
     } else {
       nextAction = "converter_para_diagnostico_com_2_horarios";
@@ -1300,11 +1378,27 @@ async function processBufferedConversation(jobPayload) {
         nextAction: nextActionForGuard || null,
       });
     }
+    const replyTextDeduped = sanitizeDuplicateReplyByHistory({
+      text: replyTextFinal,
+      historyItems,
+      nextAction: nextActionForGuard,
+    });
+    if (replyTextDeduped !== replyTextFinal) {
+      logOrchestrator("warn", "buffer.process.reply_duplicate_sanitized", {
+        explanation:
+          "Resposta da IA foi ajustada para evitar repeticao de mensagem/pergunta em sequencia.",
+        agentSlug: agent.slug,
+        conversationKey: jobPayload.conversationKey,
+        originalPreview: replyTextFinal.slice(0, 300),
+        sanitizedPreview: replyTextDeduped.slice(0, 300),
+        nextAction: nextActionForGuard || null,
+      });
+    }
     const sentReply = await sendBufferedReply({
       agent,
       provider: jobPayload.provider,
       to: senderNumber,
-      text: replyTextFinal,
+      text: replyTextDeduped,
       inboundMessageId: textOrEmpty(lastMessage?.providerMessageId),
       initialDelayMs: AGENT_INITIAL_REPLY_DELAY_MS,
       interMessageDelayMs: AGENT_INTER_MESSAGE_DELAY_MS,
@@ -1334,7 +1428,7 @@ async function processBufferedConversation(jobPayload) {
       ? []
       : sentReply.chunks.length
       ? sentReply.chunks
-      : [replyTextFinal];
+      : [replyTextDeduped];
 
     if (outboundMessages.length) {
       await saveConversationMessages({

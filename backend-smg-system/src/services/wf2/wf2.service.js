@@ -2162,7 +2162,7 @@ async function registerInboundMessageEvent({
     const currentCount = Number(leadForNextStep?.dadosBrutos?.wf2?.analysisPostReadInteractionCount || 0);
     const nextCount = currentCount + 1;
     const nextStep =
-      nextCount >= 3 ? "micro_approfundamento_ready_for_scheduling" : "micro_approfundamento_pending";
+      nextCount >= 5 ? "micro_approfundamento_ready_for_scheduling" : "micro_approfundamento_pending";
 
     leadForNextStep = await tables.lead.update({
       where: { id: leadForNextStep.id },

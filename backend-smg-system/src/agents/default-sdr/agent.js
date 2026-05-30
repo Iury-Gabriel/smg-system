@@ -627,11 +627,11 @@ module.exports = {
                 "Agendamento bloqueado: confirme primeiro que o lead abriu a analise antes de sugerir horarios.",
             };
           }
-          if (postReadCount < 3) {
+          if (postReadCount < 5) {
             return {
               ok: false,
               error:
-                "Agendamento bloqueado: faca micro-aprofundamento com pelo menos 3 interacoes relevantes apos a leitura da analise.",
+                "Agendamento bloqueado: faca micro-aprofundamento com pelo menos 5 interacoes relevantes apos a leitura da analise.",
             };
           }
 
