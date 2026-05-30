@@ -113,6 +113,38 @@ function parseValidDate(value) {
   return parsed;
 }
 
+function normalizeIntentText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function hasExplicitScheduleConsent(messageText = "") {
+  const text = normalizeIntentText(messageText);
+  if (!text) return false;
+
+  const hasNegativeIntent = /\b(nao|nao agora|depois|talvez|prefiro depois|sem agendar)\b/.test(
+    text
+  );
+  if (hasNegativeIntent) return false;
+
+  const directConsent =
+    /\b(pode agendar|pode marcar|quero agendar|vamos agendar|fechado|manda|pode ser)\b/.test(
+      text
+    );
+  if (directConsent) return true;
+
+  const hasDayOrDate =
+    /\b(segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|hoje)\b/.test(text) ||
+    /\b\d{1,2}\/\d{1,2}\b/.test(text) ||
+    /\b\d{1,2}\s+de\s+[a-z]+\b/.test(text);
+  const hasTime = /\b([01]?\d|2[0-3])(:[0-5]\d)?\s*h?\b/.test(text);
+
+  return hasDayOrDate && hasTime;
+}
+
 module.exports = {
   slug: "default-sdr",
   name: "Clara",
@@ -572,6 +604,53 @@ module.exports = {
           const lead = await findLeadByPhone(tables, senderNumber);
           if (!lead) {
             return { ok: false, error: "Lead nao encontrado para registrar agendamento." };
+          }
+
+          const wf2 = lead?.dadosBrutos?.wf2 || {};
+          const readConfirmed = Boolean(wf2.analysisReadConfirmedAt);
+          const waitingRead = Boolean(wf2.analysisAwaitingReadConfirmation);
+          const postReadCount = Number(wf2.analysisPostReadInteractionCount || 0);
+          if (String(lead.status || "").toUpperCase() !== "ANALISE_ENVIADA") {
+            return {
+              ok: false,
+              error:
+                "Agendamento bloqueado: so pode registrar diagnostico quando o lead estiver em ANALISE_ENVIADA.",
+            };
+          }
+          if (!readConfirmed || waitingRead) {
+            return {
+              ok: false,
+              error:
+                "Agendamento bloqueado: confirme primeiro que o lead abriu a analise antes de sugerir horarios.",
+            };
+          }
+          if (postReadCount < 3) {
+            return {
+              ok: false,
+              error:
+                "Agendamento bloqueado: faca micro-aprofundamento com pelo menos 3 interacoes relevantes apos a leitura da analise.",
+            };
+          }
+
+          const phoneCandidates = buildPhoneCandidates(senderNumber);
+          const recentHumanMessage = await prisma.agentConversationMessage.findFirst({
+            where: {
+              workflow,
+              agentSlug: module.exports.slug,
+              role: "human",
+              phoneNumber: {
+                in: phoneCandidates,
+              },
+            },
+            orderBy: { createdAt: "desc" },
+          });
+          const recentHumanText = String(recentHumanMessage?.content || "").trim();
+          if (!hasExplicitScheduleConsent(recentHumanText)) {
+            return {
+              ok: false,
+              error:
+                "Agendamento bloqueado: falta confirmacao explicita do lead para marcar data/horario.",
+            };
           }
 
           const scheduledAtRaw = String(scheduled_at_iso || "").trim();

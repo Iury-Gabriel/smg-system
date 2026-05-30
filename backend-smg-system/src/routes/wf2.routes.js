@@ -10,6 +10,21 @@ const {
 
 const router = express.Router();
 
+function resolvePublicBaseUrlFromRequest(req) {
+  const forwardedProtoRaw = String(req.headers?.["x-forwarded-proto"] || "").trim();
+  const forwardedProto = forwardedProtoRaw.split(",")[0]?.trim().toLowerCase();
+  const protocol =
+    forwardedProto === "http" || forwardedProto === "https"
+      ? forwardedProto
+      : String(req.protocol || "").trim().toLowerCase() || "https";
+
+  const forwardedHostRaw = String(req.headers?.["x-forwarded-host"] || "").trim();
+  const hostHeader = forwardedHostRaw.split(",")[0]?.trim() || String(req.get("host") || "").trim();
+  if (!hostHeader) return "";
+
+  return `${protocol}://${hostHeader}`;
+}
+
 router.post("/run", async (req, res, next) => {
   try {
     const workflow = String(req.body?.workflow || req.query?.workflow || "all")
@@ -39,6 +54,7 @@ router.post("/forms", async (req, res, next) => {
       phoneNumber: payload.phoneNumber || payload.telefone,
       payload: payload.form || payload,
       leadPayload: payload.lead || {},
+      publicBaseUrlOverride: resolvePublicBaseUrlFromRequest(req),
     });
 
     return res.status(201).json({

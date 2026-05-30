@@ -80,6 +80,65 @@ async function waitMs(ms = 0) {
   });
 }
 
+function containsSchedulingConfirmationClaim(text = "") {
+  const normalized = String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  if (!normalized) return false;
+
+  return (
+    /\b(agendei|agendamos|marquei|marcamos)\b/.test(normalized) ||
+    /\b(data e hora|horario)\b.*\b(marcad[oa]s?|confirmad[oa]s?)\b/.test(normalized) ||
+    /\b(ja ficou|ficou)\b.*\b(agendad[oa]|marcad[oa])\b/.test(normalized)
+  );
+}
+
+function sanitizeSchedulingClaimIfNeeded({ text = "", leadStatus = "" }) {
+  const safeText = textOrEmpty(text);
+  const status = String(leadStatus || "").trim().toUpperCase();
+  if (!safeText) return safeText;
+  if (status === "DIAGNOSTICO_AGENDADO") return safeText;
+  if (!containsSchedulingConfirmationClaim(safeText)) return safeText;
+
+  return [
+    "Perfeito, faz sentido avancarmos.",
+    "Antes de registrar o agendamento, te passo duas opcoes de horario para voce escolher.",
+  ].join(" ");
+}
+
+function containsScheduleOffering(text = "") {
+  const normalized = String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  if (!normalized) return false;
+
+  return (
+    /\b(tenho|temos)\b.*\b(amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/.test(
+      normalized
+    ) ||
+    /\b(dois horarios|2 horarios|horarios?)\b/.test(normalized) ||
+    /\b(as\s+\d{1,2}h|\d{1,2}:\d{2})\b/.test(normalized)
+  );
+}
+
+function sanitizeScheduleOfferingByNextAction({ text = "", nextAction = "" }) {
+  const safeText = textOrEmpty(text);
+  const action = String(nextAction || "").trim();
+  if (!safeText) return safeText;
+  if (action === "converter_para_diagnostico_com_2_horarios") return safeText;
+  if (!containsScheduleOffering(safeText)) return safeText;
+
+  if (action === "pedir_permissao_para_enviar_horarios") {
+    return "Faz sentido. Posso te mandar duas opcoes de horario para voce escolher?";
+  }
+
+  return "Entendi. Antes de falarmos de agenda, quero aprofundar mais um ponto rapido para te orientar melhor.";
+}
+
 function isClearMemoryCommand(value = "") {
   const normalized = textOrEmpty(value).trim().toLowerCase();
   if (!normalized) return false;
@@ -231,12 +290,14 @@ function mapWf2OperationalContext(lead = null) {
   } else if (status === "ANALISE_ENVIADA" && analysis.awaiting_read_confirmation) {
     nextAction = "confirmar_leitura_da_analise_sem_reapresentacao";
   } else if (status === "ANALISE_ENVIADA") {
-    const hasMinimumDepth =
-      analysis.post_read_interaction_count >= 3 ||
-      analysis.delivery_step === "micro_approfundamento_ready_for_scheduling";
-    nextAction = hasMinimumDepth
-      ? "converter_para_diagnostico_com_2_horarios"
-      : "aprofundar_antes_de_agendar_sem_horarios";
+    const count = Number(analysis.post_read_interaction_count || 0);
+    if (count < 2) {
+      nextAction = "aprofundar_antes_de_agendar_sem_horarios";
+    } else if (count < 3) {
+      nextAction = "pedir_permissao_para_enviar_horarios";
+    } else {
+      nextAction = "converter_para_diagnostico_com_2_horarios";
+    }
   } else if (status === "DIAGNOSTICO_AGENDADO") {
     nextAction = "confirmar_proximos_passos_pos_agendamento";
   }
@@ -913,6 +974,7 @@ async function processBufferedConversation(jobPayload) {
     const agent = getAgentOrThrow(jobPayload.agentSlug);
     workflow = getAgentWorkflow(agent);
     const prisma = getPrismaForAgent(agent);
+    const tables = getWorkflowTables(prisma, workflow);
     const aiConfig = getAiConfig(agent);
     const lastMessage = messages[messages.length - 1];
     const senderNumber = normalizePhone(lastMessage?.senderNumber);
@@ -1186,12 +1248,54 @@ async function processBufferedConversation(jobPayload) {
       },
     });
 
-    const replyText = textOrEmpty(aiResult?.text || aiConfig.fallbackReply);
+    const replyTextRaw = textOrEmpty(aiResult?.text || aiConfig.fallbackReply);
+    const latestLeadForGuard = await findLeadForInboundContext({
+      tables,
+      senderNumber,
+      agentSlug: agent.slug,
+    });
+    const latestOperationalContext = mapWf2OperationalContext(latestLeadForGuard);
+    const fallbackNextAction = textOrEmpty(inboundContext?.payload?.wf2_context?.next_action);
+    const nextActionForGuard =
+      textOrEmpty(latestOperationalContext?.next_action) || fallbackNextAction;
+
+    const replyTextAfterClaimGuard = sanitizeSchedulingClaimIfNeeded({
+      text: replyTextRaw,
+      leadStatus: latestLeadForGuard?.status || inboundContext?.payload?.lead?.status || "",
+    });
+    if (replyTextAfterClaimGuard !== replyTextRaw) {
+      logOrchestrator("warn", "buffer.process.reply_scheduling_claim_sanitized", {
+        explanation:
+          "Resposta da IA foi sanitizada para evitar confirmacao falsa de agendamento sem status DIAGNOSTICO_AGENDADO.",
+        agentSlug: agent.slug,
+        conversationKey: jobPayload.conversationKey,
+        originalPreview: replyTextRaw.slice(0, 300),
+        sanitizedPreview: replyTextAfterClaimGuard.slice(0, 300),
+        leadStatus: String(
+          latestLeadForGuard?.status || inboundContext?.payload?.lead?.status || ""
+        ).toUpperCase(),
+      });
+    }
+    const replyTextFinal = sanitizeScheduleOfferingByNextAction({
+      text: replyTextAfterClaimGuard,
+      nextAction: nextActionForGuard,
+    });
+    if (replyTextFinal !== replyTextAfterClaimGuard) {
+      logOrchestrator("warn", "buffer.process.reply_schedule_offering_sanitized", {
+        explanation:
+          "Oferta de horarios foi sanitizada para respeitar o proximo passo operacional do fluxo inbound.",
+        agentSlug: agent.slug,
+        conversationKey: jobPayload.conversationKey,
+        originalPreview: replyTextAfterClaimGuard.slice(0, 300),
+        sanitizedPreview: replyTextFinal.slice(0, 300),
+        nextAction: nextActionForGuard || null,
+      });
+    }
     const sentReply = await sendBufferedReply({
       agent,
       provider: jobPayload.provider,
       to: senderNumber,
-      text: replyText,
+      text: replyTextFinal,
       inboundMessageId: textOrEmpty(lastMessage?.providerMessageId),
       initialDelayMs: AGENT_INITIAL_REPLY_DELAY_MS,
       interMessageDelayMs: AGENT_INTER_MESSAGE_DELAY_MS,
@@ -1221,7 +1325,7 @@ async function processBufferedConversation(jobPayload) {
       ? []
       : sentReply.chunks.length
       ? sentReply.chunks
-      : [replyText];
+      : [replyTextFinal];
 
     if (outboundMessages.length) {
       await saveConversationMessages({

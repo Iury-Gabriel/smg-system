@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
+const { promises: dnsPromises } = require("dns");
 const { LeadSegment, ScrapeSource } = require("@prisma/client");
 const env = require("../../config/env");
 const { listWorkflowConfigs, resolveWorkflow } = require("../../config/workflows");
@@ -393,19 +394,35 @@ function isLocalhostUrl(url) {
   }
 }
 
-function resolvePublicBaseUrlForPdf() {
-  const explicit = textOrEmpty(env.publicWebhookBaseUrl);
-  if (!explicit) {
+async function resolvePublicBaseUrlForPdf(preferredBaseUrl = "") {
+  const candidates = [textOrEmpty(preferredBaseUrl), textOrEmpty(env.publicWebhookBaseUrl)]
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+
+  if (!candidates.length) {
     throw new Error(
       "PUBLIC_WEBHOOK_BASE_URL nao configurado. Defina uma URL HTTPS publica para o envio do PDF no WhatsApp."
     );
   }
-  if (isLocalhostUrl(explicit)) {
-    throw new Error(
-      "PUBLIC_WEBHOOK_BASE_URL aponta para localhost. Use uma URL publica acessivel pela Meta/Uazapi para envio do PDF."
-    );
+
+  const errors = [];
+  for (const candidate of candidates) {
+    if (isLocalhostUrl(candidate)) {
+      errors.push(`${candidate} (localhost nao permitido)`);
+      continue;
+    }
+    try {
+      const parsed = new URL(candidate);
+      await dnsPromises.lookup(parsed.hostname);
+      return candidate;
+    } catch (error) {
+      errors.push(`${candidate} (${error?.code || error?.message || "dns_lookup_failed"})`);
+    }
   }
-  return explicit;
+
+  throw new Error(
+    `Nenhuma base URL publica valida para PDF. Tentativas: ${errors.join(" | ")}`
+  );
 }
 
 async function resolveTemplateText(prisma, workflow, segmento, etapa, fallback) {
@@ -803,6 +820,7 @@ async function processAnalysisForLead({
   tables,
   lead,
   config = null,
+  publicBaseUrlOverride = "",
 }) {
   if (!env.allowOutboundMessages) {
     logWf2("warn", "analysis.skip.outbound_disabled", {
@@ -967,7 +985,12 @@ async function processAnalysisForLead({
     });
 
     const analysisText = textOrEmpty(aiResult.text);
-    const publicBaseUrl = resolvePublicBaseUrlForPdf();
+    const savedOverride =
+      textOrEmpty(lead?.dadosBrutos?.wf2?.publicBaseUrlOverride) ||
+      textOrEmpty(currentLead?.dadosBrutos?.wf2?.publicBaseUrlOverride);
+    const publicBaseUrl = await resolvePublicBaseUrlForPdf(
+      textOrEmpty(publicBaseUrlOverride) || savedOverride
+    );
     logWf2("info", "analysis.pdf.generate.start", {
       explanation: "Inicio da geracao do PDF da analise de maturidade.",
       workflow,
@@ -1146,6 +1169,7 @@ async function triggerAnalysisForLeadAsync({
   lead,
   config = null,
   source = "unknown",
+  publicBaseUrlOverride = "",
 }) {
   const leadId = textOrEmpty(lead?.id);
   if (!leadId) {
@@ -1165,6 +1189,7 @@ async function triggerAnalysisForLeadAsync({
         tables,
         lead,
         config,
+        publicBaseUrlOverride,
       });
       logWf2("info", "analysis.async.finished", {
         explanation: "Processamento assíncrono de análise concluído.",
@@ -2281,6 +2306,7 @@ async function createDiagnosticoFromPayload({
   phoneNumber,
   payload = {},
   leadPayload = {},
+  publicBaseUrlOverride = "",
 }) {
   const workflow = resolveWorkflow(workflowInput);
   const prisma = getPrisma(workflow);
@@ -2369,6 +2395,7 @@ async function createDiagnosticoFromPayload({
           wf2: {
             inboundToken: normalizedToken,
             formularioCriadoAt: new Date().toISOString(),
+            publicBaseUrlOverride: textOrEmpty(publicBaseUrlOverride) || null,
           },
         }),
       },
@@ -2387,6 +2414,7 @@ async function createDiagnosticoFromPayload({
           wf2: {
             inboundToken: normalizedToken,
             formularioCriadoAt: new Date().toISOString(),
+            publicBaseUrlOverride: textOrEmpty(publicBaseUrlOverride) || null,
           },
         }),
       },
@@ -2415,6 +2443,7 @@ async function createDiagnosticoFromPayload({
       lead,
       config: await ensureWorkflowConfigRows(prisma, workflow),
       source: "form_submit",
+      publicBaseUrlOverride: textOrEmpty(publicBaseUrlOverride),
     });
   } catch (error) {
     logWf2("error", "forms.analysis.trigger_failed", {
