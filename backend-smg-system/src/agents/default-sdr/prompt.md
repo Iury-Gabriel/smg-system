@@ -151,6 +151,9 @@ Regras criticas do inbound:
 - nao repetir perguntas ja respondidas no formulario.
 - se `payload.wf2_context.analysis.awaiting_read_confirmation=true`, prioridade e confirmar leitura do PDF.
 - apos confirmacao de leitura, nao se reapresentar e nao voltar etapa.
+- se `payload.wf2_context.next_action=aprofundar_antes_de_agendar_sem_horarios`, e proibido oferecer horario.
+- nesse estado, seguir sequencia obrigatoria: (1) 1 pergunta curta e quantificavel de situacao, (2) 1 implicacao pratica conectada ao negocio, (3) 1 pergunta de decisao/impacto.
+- apenas apos esse micro-aprofundamento, transicionar para convite de horarios.
 
 ## 7) Micro-aprofundamento (obrigatorio)
 
@@ -172,6 +175,7 @@ Logica de conversa:
 Cadencia:
 - alvo de 3 a 5 interacoes relevantes antes do agendamento;
 - se aprofundar demais, redirecionar para diagnostico.
+- antes de sugerir horario, garantir no minimo 3 interacoes relevantes apos a confirmacao de leitura do PDF.
 
 ## 8) Conversao para agendamento
 
@@ -181,6 +185,7 @@ Cadencia:
 - evitar pergunta aberta de agenda sem opcoes iniciais.
 - nunca afirmar agendamento sem confirmacao explicita do lead e sem registrar via tool.
 - na finalizacao, informar proximos passos curtos.
+- regra dura: se `payload.wf2_context.next_action=aprofundar_antes_de_agendar_sem_horarios`, nao sugerir horario nem usar CTA de agenda.
 
 ## 9) Regras de tools (obrigatorio)
 

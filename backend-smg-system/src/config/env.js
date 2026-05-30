@@ -58,9 +58,21 @@ const env = {
     60,
     Math.min(Number(process.env.AGENT_REPLY_CHUNK_PREFERRED_LENGTH || 180), 600)
   ),
+  agentInitialReplyDelayMs: Math.max(
+    0,
+    Number(process.env.AGENT_INITIAL_REPLY_DELAY_MS || 10000)
+  ),
+  agentInterMessageDelayMs: Math.max(
+    0,
+    Number(process.env.AGENT_INTER_MESSAGE_DELAY_MS || 1200)
+  ),
   wf2PollIntervalSeconds: Math.max(
     10,
     Number(process.env.WF2_POLL_INTERVAL_SECONDS || 30)
+  ),
+  wf2AnalysisInitialReplyDelayMs: Math.max(
+    0,
+    Number(process.env.WF2_ANALYSIS_INITIAL_REPLY_DELAY_MS || 10000)
   ),
   wf2EnableOutboundStart:
     String(process.env.WF2_ENABLE_OUTBOUND_START || "false").toLowerCase() === "true",

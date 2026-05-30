@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const path = require("path");
+const fs = require("fs");
 const { LeadSegment, ScrapeSource } = require("@prisma/client");
 const env = require("../../config/env");
 const { listWorkflowConfigs, resolveWorkflow } = require("../../config/workflows");
@@ -34,6 +35,10 @@ const FINAL_STATUSES = new Set(["DESQUALIFICADO", "DIAGNOSTICO_AGENDADO"]);
 const ANALYSIS_SEQUENCE_DELAY_MS = Math.max(
   0,
   Number(process.env.WF2_ANALYSIS_SEQUENCE_DELAY_MS || 2500)
+);
+const ANALYSIS_INITIAL_REPLY_DELAY_MS = Math.max(
+  0,
+  Number(env.wf2AnalysisInitialReplyDelayMs || process.env.WF2_ANALYSIS_INITIAL_REPLY_DELAY_MS || 10000)
 );
 const analysisInFlightLocks = new Set();
 const OPT_OUT_REGEX = /\b(parar|sair|remover|nao quero|não quero|stop|cancelar|opt[\s-]?out)\b/i;
@@ -164,6 +169,14 @@ async function waitAnalysisSequenceDelay() {
   if (ANALYSIS_SEQUENCE_DELAY_MS <= 0) return;
   await new Promise((resolve) => {
     setTimeout(resolve, ANALYSIS_SEQUENCE_DELAY_MS);
+  });
+}
+
+async function waitMs(ms = 0) {
+  const safeMs = Math.max(0, Number(ms) || 0);
+  if (!safeMs) return;
+  await new Promise((resolve) => {
+    setTimeout(resolve, safeMs);
   });
 }
 
@@ -368,6 +381,33 @@ async function sendLeadDocument({
   });
 }
 
+function isLocalhostUrl(url) {
+  const value = textOrEmpty(url);
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function resolvePublicBaseUrlForPdf() {
+  const explicit = textOrEmpty(env.publicWebhookBaseUrl);
+  if (!explicit) {
+    throw new Error(
+      "PUBLIC_WEBHOOK_BASE_URL nao configurado. Defina uma URL HTTPS publica para o envio do PDF no WhatsApp."
+    );
+  }
+  if (isLocalhostUrl(explicit)) {
+    throw new Error(
+      "PUBLIC_WEBHOOK_BASE_URL aponta para localhost. Use uma URL publica acessivel pela Meta/Uazapi para envio do PDF."
+    );
+  }
+  return explicit;
+}
+
 async function resolveTemplateText(prisma, workflow, segmento, etapa, fallback) {
   const stage = textOrEmpty(etapa).toLowerCase();
   const segment = textOrEmpty(segmento).toLowerCase() || "outro";
@@ -409,32 +449,75 @@ function applyTemplateVariables(template, lead, extra = {}) {
 }
 
 function buildAnalysisPrompt(form, lead) {
+  const rawData = form?.rawData && typeof form.rawData === "object" ? form.rawData : {};
+  const cargoEmpresa =
+    textOrEmpty(rawData.cargo_empresa) ||
+    textOrEmpty(rawData.cargoEmpresa) ||
+    textOrEmpty(rawData.cargo) ||
+    "-";
+
   return [
-    "Voce e especialista em diagnostico operacional para negocios SMB.",
-    "Gere uma Analise de Maturidade Operacional no framework SIG (Sistema, Inteligencia, Gestao).",
-    "Formato esperado:",
-    "1) Resumo executivo",
-    "2) Pilar Sistema",
-    "3) Pilar Inteligencia",
-    "4) Pilar Gestao",
-    "5) Top 3 gargalos",
-    "6) Pre-diagnostico",
-    "7) Proximos passos",
+    "Voce e especialista senior em arquitetura operacional e inteligencia de negocios da SMG.",
+    "Sua tarefa e gerar uma Analise de Maturidade Operacional personalizada, consultiva e executiva.",
+    "Este documento e um pre-diagnostico: nao vende, nao promete, nao cita preco, nao cita escopo de implementacao.",
+    "Objetivo da leitura: reconhecimento -> urgencia -> desejo de aprofundar no diagnostico.",
     "",
-    `Empresa: ${lead?.empresa || "-"}`,
-    `Segmento: ${form?.segmento || lead?.segmento || "-"}`,
-    `Faturamento mensal: ${form?.faturamentoMensal || "-"}`,
-    `Numero de funcionarios: ${form?.numFuncionarios ?? "-"}`,
-    `Ferramentas atuais: ${form?.ferramentas || "-"}`,
-    `Tentativa anterior: ${form?.tentativaAnterior || "-"}`,
-    `Mudanca desejada na operacao: ${form?.mudancaOperacao || "-"}`,
-    `Descricao da operacao: ${form?.descricaoOperacao || "-"}`,
-    `Urgencia: ${form?.urgencia || "-"}`,
-    `Maior desafio: ${form?.maiorDesafio || "-"}`,
-    `Motivacao: ${form?.motivacao || "-"}`,
-    `Expectativa: ${form?.expectativa || "-"}`,
+    "DADOS DO LEAD:",
+    `- Nome do responsavel: ${lead?.nome || "-"}`,
+    `- Cargo: ${cargoEmpresa}`,
+    `- Nome da empresa: ${lead?.empresa || "-"}`,
+    `- Segmento e atuacao: ${form?.segmento || lead?.segmento || "-"}`,
+    `- Faturamento mensal: ${form?.faturamentoMensal || "-"}`,
+    `- Numero de funcionarios: ${form?.numFuncionarios ?? "-"}`,
+    `- Ferramentas usadas: ${form?.ferramentas || "-"}`,
+    `- Tentativa anterior: ${form?.tentativaAnterior || "-"}`,
+    `- Descricao da operacao atual: ${form?.descricaoOperacao || "-"}`,
+    `- O que mudaria na operacao: ${form?.mudancaOperacao || "-"}`,
+    `- Urgencia declarada: ${form?.urgencia || "-"}`,
+    `- Maior desafio atual: ${form?.maiorDesafio || "-"}`,
+    `- Motivacao para buscar a SMG: ${form?.motivacao || "-"}`,
+    `- Expectativa de resultado: ${form?.expectativa || "-"}`,
     "",
-    "Escreva em pt-BR objetivo, sem floreio e com clareza executiva.",
+    "FRAMEWORK SIG (Sistema, Inteligencia, Gestao):",
+    "- Sistema: processos, integracao entre ferramentas, dependencia humana, previsibilidade operacional.",
+    "- Inteligencia: uso de dados, visibilidade de indicadores, automacao de rotinas, rastreabilidade.",
+    "- Gestao: controle, previsibilidade de resultado, capacidade de escalar sem caos operacional.",
+    "",
+    "ESCALA DE MATURIDADE POR PILAR (1 a 5):",
+    "1 = Reativo | 2 = Iniciante | 3 = Organizado | 4 = Avancado | 5 = Estruturado.",
+    "Regra obrigatoria: o score nunca pode contradizer a leitura operacional do mesmo pilar.",
+    "Se a leitura mostra improviso, perda de controle ou dependencia critica, o score deve ser 1 ou 2.",
+    "Porte ajuda a calibrar, mas nao pode maquiar sintomas concretos.",
+    "",
+    "REGRAS DE TOM E CONTEUDO:",
+    "- Tom consultivo, estrategico, humano, objetivo e preciso.",
+    "- Linguagem acessivel ao perfil do lead e ao segmento informado.",
+    "- Use fortemente os campos livres (descricao_operacao, mudanca_operacao, maior_desafio, motivacao, expectativa).",
+    "- Se faltar dado, diga que o ponto sera aprofundado no diagnostico. Nunca invente.",
+    "- Proibido: cliches de marketing, jargao tecnico desnecessario, promessas numericas, pitch de vendas.",
+    "",
+    "ESTRUTURA OBRIGATORIA DE SAIDA (texto puro, sem markdown):",
+    "CAPA",
+    "SECAO 1 - VISAO GERAL EXECUTIVA",
+    "SECAO 2 - SCORE DE MATURIDADE SIG",
+    "SECAO 3 - LEITURA OPERACIONAL",
+    "SECAO 4 - PRINCIPAIS GARGALOS IDENTIFICADOS",
+    "SECAO 5 - IMPACTOS OPERACIONAIS",
+    "SECAO 6 - OPORTUNIDADES DE EVOLUCAO",
+    "SECAO 7 - CONCLUSAO E TRANSICAO PARA O DIAGNOSTICO",
+    "RODAPE",
+    "",
+    "Detalhamento obrigatorio por secao:",
+    "- SECAO 1: 5 a 7 linhas em prosa executiva, sem bullets.",
+    "- SECAO 2: listar Sistema, Inteligencia e Gestao com score [X] / 5 e 1 frase por pilar; incluir maturidade geral (media) e 1 paragrafo curto interpretativo.",
+    "- SECAO 3: para cada pilar, 2 paragrafos: (a) avaliacao especifica (b) implicacao pratica.",
+    "- SECAO 4: top 3 gargalos por criticidade, com nome direto, manifestacao concreta e impacto provavel.",
+    "- SECAO 5: 3 paragrafos de consequencias operacionais se nada mudar, sem dramatizacao exagerada.",
+    "- SECAO 6: 3 paragrafos curtos no formato 'E se...', totalmente conectados ao caso do lead, sem explicar implementacao.",
+    "- SECAO 7: 2 paragrafos: sintese final + posicionamento consultivo do diagnostico (sem CTA agressivo).",
+    "- RODAPE: incluir confidencialidade para a empresa e nota de que o aprofundamento ocorre no diagnostico.",
+    "",
+    "Escreva em pt-BR, com acentuacao correta e alta personalizacao contextual.",
   ].join("\n");
 }
 
@@ -853,6 +936,22 @@ async function processAnalysisForLead({
       };
     }
 
+    const firstName = toShortFirstName(currentLead?.nome || "");
+    const companyName = textOrEmpty(currentLead?.empresa || "sua empresa");
+    const ackText = `Recebi suas respostas aqui, ${firstName}. To preparando a analise da ${companyName}, te mando ainda hoje.`;
+    const introText = `${firstName}, aqui esta sua Analise de Maturidade da ${companyName}`;
+
+    if (ANALYSIS_INITIAL_REPLY_DELAY_MS > 0) {
+      await waitMs(ANALYSIS_INITIAL_REPLY_DELAY_MS);
+    }
+    await sendLeadText({
+      agent,
+      provider,
+      lead: currentLead,
+      text: ackText,
+    });
+    await waitAnalysisSequenceDelay();
+
     const userPrompt = buildAnalysisPrompt(form, currentLead);
     const aiResult = await generateAiReply({
       systemPrompt: [
@@ -868,8 +967,16 @@ async function processAnalysisForLead({
     });
 
     const analysisText = textOrEmpty(aiResult.text);
-    const publicBaseUrl =
-      textOrEmpty(env.publicWebhookBaseUrl) || `http://localhost:${env.port}`;
+    const publicBaseUrl = resolvePublicBaseUrlForPdf();
+    logWf2("info", "analysis.pdf.generate.start", {
+      explanation: "Inicio da geracao do PDF da analise de maturidade.",
+      workflow,
+      leadId: currentLead.id,
+      formId: form.id,
+      publicBaseUrl,
+      companyName,
+      analysisTextChars: analysisText.length,
+    });
     const file = await generateAnalysisPdf({
       projectRoot: process.cwd(),
       publicBaseUrl,
@@ -879,14 +986,27 @@ async function processAnalysisForLead({
     });
     if (!file.publicUrl) {
       throw new Error(
-        "PUBLIC_WEBHOOK_BASE_URL nao configurado para envio de documento PDF publico."
+        "Nao foi possivel montar URL publica do PDF. Revise PUBLIC_WEBHOOK_BASE_URL."
       );
     }
+    let fileSizeBytes = null;
+    try {
+      fileSizeBytes = fs.statSync(file.absolutePath).size;
+    } catch (_error) {
+      fileSizeBytes = null;
+    }
+    logWf2("info", "analysis.pdf.generate.success", {
+      explanation: "PDF da analise gerado com sucesso.",
+      workflow,
+      leadId: currentLead.id,
+      formId: form.id,
+      absolutePath: file.absolutePath,
+      relativePath: file.relativePath,
+      publicUrl: file.publicUrl,
+      filename: file.filename,
+      fileSizeBytes,
+    });
 
-    const firstName = toShortFirstName(currentLead?.nome || "");
-    const companyName = textOrEmpty(currentLead?.empresa || "sua empresa");
-    const ackText = `Recebi suas respostas aqui, ${firstName}. To preparando a analise da ${companyName}, te mando ainda hoje.`;
-    const introText = `${firstName}, aqui esta sua Analise de Maturidade da ${companyName}`;
     const followupText = buildAnalysisInsightMessage({
       lead: currentLead,
       form,
@@ -896,26 +1016,50 @@ async function processAnalysisForLead({
       agent,
       provider,
       lead: currentLead,
-      text: ackText,
-    });
-    await waitAnalysisSequenceDelay();
-
-    await sendLeadText({
-      agent,
-      provider,
-      lead: currentLead,
       text: introText,
     });
     await waitAnalysisSequenceDelay();
 
-    await sendLeadDocument({
-      agent,
-      provider,
-      lead: currentLead,
-      documentUrl: file.publicUrl,
-      caption: `Analise de Maturidade da ${companyName}`,
-      filename: file.filename,
-    });
+    try {
+      logWf2("info", "analysis.pdf.send.request", {
+        explanation: "Tentativa de envio do PDF da analise para o provider.",
+        workflow,
+        leadId: currentLead.id,
+        provider: normalizeProvider(provider || agent?.defaultProvider) || provider || null,
+        phone: currentLead.telefone || null,
+        documentUrl: file.publicUrl,
+        filename: file.filename,
+      });
+      const sendDocumentResult = await sendLeadDocument({
+        agent,
+        provider,
+        lead: currentLead,
+        documentUrl: file.publicUrl,
+        caption: `Analise de Maturidade da ${companyName}`,
+        filename: file.filename,
+      });
+      logWf2("info", "analysis.pdf.send.success", {
+        explanation: "Provider confirmou envio do PDF da analise.",
+        workflow,
+        leadId: currentLead.id,
+        provider: normalizeProvider(provider || agent?.defaultProvider) || provider || null,
+        resultStatus: sendDocumentResult?.status || null,
+        providerPayload: sendDocumentResult?.data || null,
+      });
+    } catch (error) {
+      logWf2("error", "analysis.send_document_failed", {
+        explanation:
+          "Falha ao enviar PDF da analise para o provider. Verifique URL publica do arquivo e resposta do provider.",
+        workflow,
+        leadId: currentLead.id,
+        provider: normalizeProvider(provider || agent?.defaultProvider) || provider || null,
+        documentUrl: file.publicUrl,
+        filename: file.filename,
+        message: error?.message || "unknown",
+        providerDetails: error?.details || null,
+      });
+      throw error;
+    }
     await waitAnalysisSequenceDelay();
 
     await sendLeadText({
@@ -952,6 +1096,7 @@ async function processAnalysisForLead({
             analysisAwaitingReadConfirmation: true,
             analysisReadConfirmedAt: null,
             analysisDeliveryStep: "awaiting_read_confirmation",
+            analysisPostReadInteractionCount: 0,
             analysisDeliveryCycleId: `${now.getTime()}-${currentLead.id.slice(0, 8)}`,
           },
         }),
@@ -990,6 +1135,76 @@ async function processAnalysisForLead({
   } finally {
     analysisInFlightLocks.delete(lockKey);
   }
+}
+
+async function triggerAnalysisForLeadAsync({
+  workflow,
+  agent,
+  provider,
+  prisma,
+  tables,
+  lead,
+  config = null,
+  source = "unknown",
+}) {
+  const leadId = textOrEmpty(lead?.id);
+  if (!leadId) {
+    return {
+      queued: false,
+      reason: "lead_not_found",
+    };
+  }
+
+  const run = async () => {
+    try {
+      const result = await processAnalysisForLead({
+        workflow,
+        agent,
+        provider,
+        prisma,
+        tables,
+        lead,
+        config,
+      });
+      logWf2("info", "analysis.async.finished", {
+        explanation: "Processamento assíncrono de análise concluído.",
+        workflow,
+        leadId,
+        source,
+        processed: Boolean(result?.processed),
+        reason: result?.reason || null,
+      });
+    } catch (error) {
+      logWf2("error", "analysis.async.failed", {
+        explanation: "Falha no processamento assíncrono da análise.",
+        workflow,
+        leadId,
+        source,
+        message: error?.message || "unknown",
+      });
+      await appendTimeline(prisma, {
+        workflow,
+        leadId,
+        tipo: "erro_analise",
+        etapa: "etapa6",
+        direcao: "system",
+        mensagem: error?.message || "Erro ao gerar/enviar analise.",
+        metadata: {
+          source,
+          async: true,
+        },
+      }).catch(() => null);
+    }
+  };
+
+  setTimeout(() => {
+    run().catch(() => null);
+  }, 0);
+
+  return {
+    queued: true,
+    reason: "analysis_processing_queued",
+  };
 }
 
 async function processNewOutboundLead({
@@ -1736,7 +1951,8 @@ async function registerInboundMessageEvent({
           wf2: {
             analysisAwaitingReadConfirmation: false,
             analysisReadConfirmedAt: confirmedAt,
-            analysisDeliveryStep: "read_confirmed",
+            analysisDeliveryStep: "micro_approfundamento_pending",
+            analysisPostReadInteractionCount: 0,
           },
         }),
       },
@@ -1763,6 +1979,41 @@ async function registerInboundMessageEvent({
       leadId: leadForNextStep.id,
       status: normalizedStatus,
       confirmedAt,
+    });
+  }
+
+  const shouldTrackPostReadInbound =
+    normalizedStatus === "ANALISE_ENVIADA" &&
+    !analysisReadConfirmedNow &&
+    Boolean(leadForNextStep?.dadosBrutos?.wf2?.analysisReadConfirmedAt) &&
+    !Boolean(leadForNextStep?.dadosBrutos?.wf2?.analysisAwaitingReadConfirmation);
+
+  if (shouldTrackPostReadInbound) {
+    const currentCount = Number(leadForNextStep?.dadosBrutos?.wf2?.analysisPostReadInteractionCount || 0);
+    const nextCount = currentCount + 1;
+    const nextStep =
+      nextCount >= 3 ? "micro_approfundamento_ready_for_scheduling" : "micro_approfundamento_pending";
+
+    leadForNextStep = await tables.lead.update({
+      where: { id: leadForNextStep.id },
+      data: {
+        dadosBrutos: mergeDadosBrutos(leadForNextStep.dadosBrutos, {
+          wf2: {
+            analysisPostReadInteractionCount: nextCount,
+            analysisDeliveryStep: nextStep,
+          },
+        }),
+      },
+    });
+    normalizedStatus = String(leadForNextStep.status || "").toUpperCase();
+
+    logWf2("info", "inbound.message.analysis_post_read_progress", {
+      explanation:
+        "Contador de interacoes apos leitura da analise atualizado para controlar transicao ao agendamento.",
+      workflow,
+      leadId: leadForNextStep.id,
+      postReadInteractionCount: nextCount,
+      analysisDeliveryStep: nextStep,
     });
   }
 
@@ -1799,7 +2050,7 @@ async function registerInboundMessageEvent({
     }
 
     const agent = await resolveAgentForLead(leadForNextStep);
-    const analysisResult = await processAnalysisForLead({
+    const analysisResult = await triggerAnalysisForLeadAsync({
       workflow,
       agent,
       provider,
@@ -1807,50 +2058,22 @@ async function registerInboundMessageEvent({
       tables,
       lead: leadForNextStep,
       config: await ensureWorkflowConfigRows(prisma, workflow),
+      source: token ? "inbound_token" : "inbound_form_match",
     });
     logWf2("info", "inbound.message.token_analysis", {
       explanation:
-        "Mensagem inbound com formulario vinculado processada e tentativa de envio da analise iniciada automaticamente.",
+        "Mensagem inbound com formulario vinculado processada e envio da analise disparado em background.",
       workflow,
       leadId: leadForNextStep.id,
       token: token || null,
-      analysisProcessed: Boolean(analysisResult.processed),
+      analysisQueued: Boolean(analysisResult.queued),
       reason: analysisResult.reason || null,
     });
 
-    if (!analysisResult.processed) {
-      logWf2("warn", "inbound.message.analysis_not_sent", {
-        explanation:
-          "Tentativa imediata de analise foi executada, mas nao concluiu envio. IA podera seguir fluxo normal.",
-        workflow,
-        leadId: leadForNextStep.id,
-        reason: analysisResult.reason || "unknown",
-        status: normalizedStatus,
-        hasLinkedForm,
-        tokenDetected: Boolean(token),
-      });
-    }
-
-    const shouldSuppressAiReply =
-      Boolean(analysisResult.processed) ||
-      ["analysis_in_flight", "analysis_already_sent"].includes(
-        String(analysisResult.reason || "")
-      );
-
     return {
       foundLead: true,
-      suppressAi: shouldSuppressAiReply,
-      reason: analysisResult.processed
-        ? token
-          ? "analysis_sent_after_token"
-          : "analysis_sent_after_form_match"
-        : String(analysisResult.reason || "") === "analysis_already_sent"
-          ? "analysis_already_sent"
-          : String(analysisResult.reason || "") === "analysis_in_flight"
-            ? "analysis_in_flight"
-        : token
-          ? "token_processed"
-          : "inbound_form_matched",
+      suppressAi: true,
+      reason: token ? "analysis_queued_after_token" : "analysis_queued_after_form_match",
       lead: leadForNextStep,
     };
   }
@@ -2180,10 +2403,10 @@ async function createDiagnosticoFromPayload({
     metadata: { token: normalizedToken, formId: form.id },
   });
 
-  let analysisResult = null;
+  let analysisDispatch = { queued: false, reason: "not_attempted" };
   try {
     const agent = await resolveAgentForLead(lead);
-    analysisResult = await processAnalysisForLead({
+    analysisDispatch = await triggerAnalysisForLeadAsync({
       workflow,
       agent,
       provider: agent.defaultProvider,
@@ -2191,6 +2414,7 @@ async function createDiagnosticoFromPayload({
       tables,
       lead,
       config: await ensureWorkflowConfigRows(prisma, workflow),
+      source: "form_submit",
     });
   } catch (error) {
     logWf2("error", "forms.analysis.trigger_failed", {
@@ -2207,8 +2431,8 @@ async function createDiagnosticoFromPayload({
     token: normalizedToken,
     formId: form.id,
     lead: leadSummary(lead),
-    analysisTriggered: Boolean(analysisResult?.processed),
-    analysisReason: analysisResult?.reason || null,
+    analysisTriggered: Boolean(analysisDispatch?.queued),
+    analysisReason: analysisDispatch?.reason || null,
   };
 }
 

@@ -271,9 +271,73 @@ async function sendMetaDocumentMessage(
   };
 }
 
+async function sendMetaReadTypingIndicator(providerConfig, { messageId }) {
+  const config = assertMetaProviderConfig(providerConfig);
+  const inboundMessageId = textOrEmpty(messageId);
+
+  if (!inboundMessageId) {
+    const error = new Error("Campo obrigatorio: messageId.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const url = `${config.graphBaseUrl}/${encodeURIComponent(config.phoneNumberId)}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    status: "read",
+    message_id: inboundMessageId,
+    typing_indicator: {
+      type: "text",
+    },
+  };
+
+  logMeta("send_read_typing.request", {
+    explanation:
+      "Requisicao de marcacao de leitura com indicador de digitacao para WhatsApp oficial (Meta).",
+    phoneNumberId: config.phoneNumberId,
+    url,
+    payload: safeJson(payload),
+  });
+
+  const response = await axios.post(url, payload, {
+    timeout: 30000,
+    headers: {
+      Authorization: `Bearer ${config.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    validateStatus: () => true,
+  });
+
+  logMeta("send_read_typing.response", {
+    explanation: "Resposta da Meta para marcacao de leitura com indicador de digitacao.",
+    status: response.status,
+    data: safeJson(response.data),
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const message =
+      response?.data?.error?.message ||
+      response?.data?.message ||
+      `Falha ao enviar read+typing via Meta (status ${response.status}).`;
+    const error = new Error(message);
+    error.statusCode = response.status;
+    error.details = response.data;
+    throw error;
+  }
+
+  return {
+    provider: "meta",
+    status: "read_typing_sent",
+    phoneNumberId: config.phoneNumberId,
+    messageId: inboundMessageId,
+    data: response.data,
+  };
+}
+
 module.exports = {
   assertMetaProviderConfig,
   sendMetaTextMessage,
   sendMetaTemplateMessage,
   sendMetaDocumentMessage,
+  sendMetaReadTypingIndicator,
 };

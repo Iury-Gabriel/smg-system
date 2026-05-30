@@ -15,7 +15,10 @@ const { normalizePhone, textOrEmpty } = require("./helpers");
 const { getWorkflowTables } = require("../workflow-data-access.service");
 const { buildPhoneCandidates, normalizeE164, isWithinAutomationSchedule } = require("../wf2/helpers");
 const { getAgentOrThrow, getAgentProviderConfig } = require("./registry.service");
-const { sendMetaTextMessage } = require("./providers/meta.provider");
+const {
+  sendMetaTextMessage,
+  sendMetaReadTypingIndicator,
+} = require("./providers/meta.provider");
 const { sendUazapiTextMessage } = require("./providers/uazapi.provider");
 const { registerInboundMessageEvent, startOutboundFromCommand } = require("../wf2/wf2.service");
 const { retrieveAgentRagContext } = require("./rag.service");
@@ -32,6 +35,8 @@ const CLEAR_RESET_TX_OPTIONS = {
   timeout: 30000,
 };
 const CLEAR_RESET_MAX_ATTEMPTS = 2;
+const AGENT_INITIAL_REPLY_DELAY_MS = Math.max(0, Number(env.agentInitialReplyDelayMs || 0));
+const AGENT_INTER_MESSAGE_DELAY_MS = Math.max(0, Number(env.agentInterMessageDelayMs || 0));
 
 function logOrchestrator(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -65,6 +70,14 @@ function promptJson(value, max = 5000) {
   } catch (_error) {
     return "{}";
   }
+}
+
+async function waitMs(ms = 0) {
+  const safeMs = Math.max(0, Number(ms) || 0);
+  if (!safeMs) return;
+  await new Promise((resolve) => {
+    setTimeout(resolve, safeMs);
+  });
 }
 
 function isClearMemoryCommand(value = "") {
@@ -209,6 +222,7 @@ function mapWf2OperationalContext(lead = null) {
     awaiting_read_confirmation: Boolean(wf2.analysisAwaitingReadConfirmation),
     read_confirmed_at: textOrEmpty(wf2.analysisReadConfirmedAt),
     delivery_step: textOrEmpty(wf2.analysisDeliveryStep),
+    post_read_interaction_count: Number(wf2.analysisPostReadInteractionCount || 0),
   };
 
   let nextAction = "";
@@ -217,7 +231,12 @@ function mapWf2OperationalContext(lead = null) {
   } else if (status === "ANALISE_ENVIADA" && analysis.awaiting_read_confirmation) {
     nextAction = "confirmar_leitura_da_analise_sem_reapresentacao";
   } else if (status === "ANALISE_ENVIADA") {
-    nextAction = "converter_para_diagnostico_com_2_horarios";
+    const hasMinimumDepth =
+      analysis.post_read_interaction_count >= 3 ||
+      analysis.delivery_step === "micro_approfundamento_ready_for_scheduling";
+    nextAction = hasMinimumDepth
+      ? "converter_para_diagnostico_com_2_horarios"
+      : "aprofundar_antes_de_agendar_sem_horarios";
   } else if (status === "DIAGNOSTICO_AGENDADO") {
     nextAction = "confirmar_proximos_passos_pos_agendamento";
   }
@@ -717,7 +736,51 @@ async function sendTextByProvider({ agent, provider, to, text }) {
   return sendUazapiTextMessage(providerConfig, { to, text });
 }
 
-async function sendBufferedReply({ agent, provider, to, text }) {
+async function sendTypingIndicatorIfSupported({
+  agent,
+  provider,
+  inboundMessageId = "",
+  to = "",
+}) {
+  if (provider !== "meta") return { sent: false };
+  const safeMessageId = textOrEmpty(inboundMessageId);
+  if (!safeMessageId) return { sent: false };
+
+  try {
+    const { config: providerConfig } = getAgentProviderConfig(agent, provider);
+    const result = await sendMetaReadTypingIndicator(providerConfig, {
+      messageId: safeMessageId,
+    });
+    return {
+      sent: true,
+      result,
+    };
+  } catch (error) {
+    logOrchestrator("warn", "typing_indicator.send_failed", {
+      explanation:
+        "Falha ao enviar typing indicator da Meta. Fluxo segue normalmente para nao interromper resposta.",
+      agentSlug: agent?.slug || null,
+      provider,
+      to: normalizePhone(to),
+      messageId: safeMessageId,
+      message: error?.message || "unknown",
+    });
+    return {
+      sent: false,
+      error: error?.message || "unknown",
+    };
+  }
+}
+
+async function sendBufferedReply({
+  agent,
+  provider,
+  to,
+  text,
+  inboundMessageId = "",
+  initialDelayMs = AGENT_INITIAL_REPLY_DELAY_MS,
+  interMessageDelayMs = AGENT_INTER_MESSAGE_DELAY_MS,
+}) {
   if (!env.allowOutboundMessages) {
     return {
       sentCount: 0,
@@ -741,7 +804,19 @@ async function sendBufferedReply({ agent, provider, to, text }) {
   const sent = [];
   const outgoing = chunks.length ? chunks : [{ text: String(text || "").trim() }];
 
-  for (const chunk of outgoing) {
+  for (let index = 0; index < outgoing.length; index += 1) {
+    const chunk = outgoing[index];
+    const delayBeforeSend = index === 0 ? initialDelayMs : interMessageDelayMs;
+    await sendTypingIndicatorIfSupported({
+      agent,
+      provider,
+      inboundMessageId,
+      to,
+    });
+    if (delayBeforeSend > 0) {
+      await waitMs(delayBeforeSend);
+    }
+
     const result = await sendTextByProvider({
       agent,
       provider,
@@ -756,6 +831,41 @@ async function sendBufferedReply({ agent, provider, to, text }) {
     sent,
     chunks: outgoing.map((chunk) => String(chunk?.text || "").trim()).filter(Boolean),
   };
+}
+
+async function sendImmediateReplies({
+  agent,
+  provider,
+  to,
+  replies = [],
+  inboundMessageId = "",
+}) {
+  const sent = [];
+  const normalizedReplies = (Array.isArray(replies) ? replies : [])
+    .map((item) => textOrEmpty(item))
+    .filter(Boolean);
+
+  for (let index = 0; index < normalizedReplies.length; index += 1) {
+    if (index > 0 && AGENT_INTER_MESSAGE_DELAY_MS > 0) {
+      await sendTypingIndicatorIfSupported({
+        agent,
+        provider,
+        inboundMessageId,
+        to,
+      });
+      await waitMs(AGENT_INTER_MESSAGE_DELAY_MS);
+    }
+
+    const result = await sendTextByProvider({
+      agent,
+      provider,
+      to,
+      text: normalizedReplies[index],
+    });
+    sent.push(result);
+  }
+
+  return sent;
 }
 
 function scheduleBufferedProcessing(jobPayload) {
@@ -1082,6 +1192,9 @@ async function processBufferedConversation(jobPayload) {
       provider: jobPayload.provider,
       to: senderNumber,
       text: replyText,
+      inboundMessageId: textOrEmpty(lastMessage?.providerMessageId),
+      initialDelayMs: AGENT_INITIAL_REPLY_DELAY_MS,
+      interMessageDelayMs: AGENT_INTER_MESSAGE_DELAY_MS,
     });
 
     logOrchestrator("info", "buffer.process.provider_response", {
@@ -1585,22 +1698,20 @@ async function queueInboundForOrchestrator({
         ? wf2Result.immediateReplies
         : [];
       if (immediateReplies.length) {
-        for (const replyText of immediateReplies) {
-          const normalizedReply = textOrEmpty(replyText);
-          if (!normalizedReply) continue;
-          await sendTextByProvider({
-            agent,
-            provider: inboundProvider,
-            to: senderNumber,
-            text: normalizedReply,
-          });
-        }
-      } else if (textOrEmpty(wf2Result.immediateReply)) {
-        await sendTextByProvider({
+        await sendImmediateReplies({
           agent,
           provider: inboundProvider,
           to: senderNumber,
-          text: wf2Result.immediateReply,
+          replies: immediateReplies,
+          inboundMessageId: textOrEmpty(event?.messageId),
+        });
+      } else if (textOrEmpty(wf2Result.immediateReply)) {
+        await sendImmediateReplies({
+          agent,
+          provider: inboundProvider,
+          to: senderNumber,
+          replies: [wf2Result.immediateReply],
+          inboundMessageId: textOrEmpty(event?.messageId),
         });
       }
 
