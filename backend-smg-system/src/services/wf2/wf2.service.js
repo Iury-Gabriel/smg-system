@@ -81,6 +81,8 @@ const START_SEGMENT_ALIASES = {
 };
 const DEFAULT_WF2_FORM_LINK = "https://sistema.smgcompany.com.br/diagnostico";
 const LEGACY_WF2_FORM_LINK = "https://smg.com.br/diagnostico";
+const DEFAULT_PUBLIC_PDF_BASE_URL =
+  textOrEmpty(process.env.WF2_PUBLIC_PDF_BASE_URL) || "https://api-smg.iurygabriel.xyz";
 const INBOUND_WELCOME_TEMPLATE =
   "Oi {nome}, tudo bem? Eu sou a Clara, consultora virtual da SMG. Vou te acompanhar por aqui para montar seu diagnostico operacional.";
 const INBOUND_FORM_LINK_TEMPLATE =
@@ -422,7 +424,11 @@ function isLocalhostUrl(url) {
 }
 
 async function resolvePublicBaseUrlForPdf(preferredBaseUrl = "") {
-  const candidates = [textOrEmpty(preferredBaseUrl), textOrEmpty(env.publicWebhookBaseUrl)]
+  const candidates = [
+    textOrEmpty(preferredBaseUrl),
+    textOrEmpty(env.publicWebhookBaseUrl),
+    textOrEmpty(DEFAULT_PUBLIC_PDF_BASE_URL),
+  ]
     .filter(Boolean)
     .filter((value, index, array) => array.indexOf(value) === index);
 
