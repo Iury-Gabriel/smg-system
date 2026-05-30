@@ -677,13 +677,11 @@ function introLooksGenericFormConfirmation(introText) {
 }
 
 async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
-  const fallbackIntro = `Oi ${lead?.nome || "tudo bem"}, eu sou a Clara, do time comercial da SMG. Vou te enviar agora sua An\u00e1lise de Maturidade em PDF para voc\u00ea revisar com calma.`;
-  const fallbackFollowup =
-    "Te enviei a An\u00e1lise de Maturidade em PDF. Conseguiu abrir o arquivo para eu te explicar os principais pontos?";
-
   const contextSegment = textOrEmpty(form?.segmento || lead?.segmento || "outro");
   const contextChallenge = textOrEmpty(form?.maiorDesafio || "");
   const contextUrgency = textOrEmpty(form?.urgencia || "");
+  const firstName = toShortFirstName(lead?.nome || "");
+  const companyName = textOrEmpty(lead?.empresa || "sua empresa");
 
   const systemPrompt = [
     "Voce escreve mensagens curtas para WhatsApp comercial em pt-BR.",
@@ -694,9 +692,11 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
   ].join("\n");
 
   const baseUserPrompt = [
-    "Gere duas mensagens para envio da Analise de Maturidade da SMG.",
-    'Formato exato de saida: {"introText":"...","followupText":"..."}',
+    "Gere tres mensagens para envio da Analise de Maturidade da SMG.",
+    'Formato exato de saida: {"ackText":"...","introText":"...","followupText":"..."}',
     "Regras:",
+    `- ackText: confirmar que recebeu as respostas de ${firstName} e avisar que esta preparando a analise da ${companyName}.`,
+    "- ackText: maximo 220 caracteres, sem agendamento e sem pergunta.",
     "- introText: apresentar-se como Clara da SMG e avisar que vai enviar o PDF agora.",
     "- introText: incluir 1 detalhe concreto do formulario (segmento, desafio ou urgencia), sem inventar.",
     "- introText: nao fazer pergunta de qualificacao e nao pedir novamente o desafio do lead.",
@@ -715,15 +715,11 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
     `Urgencia=${contextUrgency || "-"}.`,
   ].join("\n");
 
-  const fallbackJson = JSON.stringify({
-    introText: fallbackIntro,
-    followupText: fallbackFollowup,
-  });
-
   const aiResult = await generateAiReply({
     systemPrompt,
     userPrompt: baseUserPrompt,
-    fallbackReply: fallbackJson,
+    fallbackReply: "{}",
+    strictNoFallback: true,
     useLangChain: false,
     allowEnvFallback: true,
     model: env.openaiModel || "gpt-4o-mini",
@@ -731,14 +727,17 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
   });
 
   let parsed = parseJsonObjectFromText(aiResult.text);
+  let ackText = normalizeDeliveryText(parsed?.ackText);
   let introText = normalizeDeliveryText(parsed?.introText);
   let followupText = normalizeDeliveryText(parsed?.followupText);
   let followupAsksReadConfirmation = followupRequestsReadConfirmation(followupText);
   let introHasQualificationQuestion = introContainsQualificationQuestion(introText);
   let introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
+  let ackValid = Boolean(ackText) && ackText.length <= 220 && !/\?/.test(ackText);
   let repairResult = null;
 
   if (
+    !ackValid ||
     !introText ||
     !followupAsksReadConfirmation ||
     introHasQualificationQuestion ||
@@ -748,12 +747,14 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
       systemPrompt,
       userPrompt: [
         "Corrija o JSON abaixo para cumprir todas as regras.",
-        'Formato exato de saida: {"introText":"...","followupText":"..."}',
+        'Formato exato de saida: {"ackText":"...","introText":"...","followupText":"..."}',
         `JSON atual: ${JSON.stringify({
+          ackText: ackText || "",
           introText: introText || "",
           followupText: followupText || "",
         })}`,
         "Problemas detectados:",
+        `- ackText valido (sem pergunta e <=220 chars): ${ackValid ? "sim" : "nao"}`,
         `- introText valido: ${introText ? "sim" : "nao"}`,
         `- introText sem pergunta de qualificacao: ${
           introHasQualificationQuestion ? "nao" : "sim"
@@ -766,7 +767,8 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
         }`,
         "Mantenha o tom natural, use acentuacao correta e sem markdown.",
       ].join("\n"),
-      fallbackReply: fallbackJson,
+      fallbackReply: "{}",
+      strictNoFallback: true,
       useLangChain: false,
       allowEnvFallback: true,
       model: env.openaiModel || "gpt-4o-mini",
@@ -774,41 +776,46 @@ async function generateAnalysisDeliveryMessages({ workflow, lead, form }) {
     });
 
     parsed = parseJsonObjectFromText(repairResult.text);
+    ackText = normalizeDeliveryText(parsed?.ackText);
     introText = normalizeDeliveryText(parsed?.introText);
     followupText = normalizeDeliveryText(parsed?.followupText);
     followupAsksReadConfirmation = followupRequestsReadConfirmation(followupText);
     introHasQualificationQuestion = introContainsQualificationQuestion(introText);
     introGenericFormConfirmation = introLooksGenericFormConfirmation(introText);
+    ackValid = Boolean(ackText) && ackText.length <= 220 && !/\?/.test(ackText);
   }
 
-  const introValid =
-    Boolean(introText) && !introHasQualificationQuestion && !introGenericFormConfirmation;
-  const finalIntroText = introValid ? introText : fallbackIntro;
-  const finalFollowupText = followupAsksReadConfirmation ? followupText : fallbackFollowup;
-  const usedHardFallback =
-    finalIntroText === fallbackIntro || finalFollowupText === fallbackFollowup;
+  const introValid = Boolean(introText) && !introHasQualificationQuestion && !introGenericFormConfirmation;
+  const followupValid = Boolean(followupText) && followupAsksReadConfirmation;
+
+  if (!ackValid || !introValid || !followupValid) {
+    throw new Error(
+      "Falha ao validar copy de entrega da analise gerada pela OpenAI em modo estrito."
+    );
+  }
 
   logWf2("info", "analysis.delivery_copy.validation", {
     explanation:
       "Validacao final do copy de entrega da analise com prioridade para texto gerado pela IA.",
     workflow,
     leadId: lead?.id || null,
+    ackValid: Boolean(ackValid),
     hadRepairPass: Boolean(repairResult),
     introGenerated: introValid,
     introHasQualificationQuestion,
     introGenericFormConfirmation,
     followupAsksReadConfirmation: Boolean(followupAsksReadConfirmation),
-    usedHardFallback,
+    usedHardFallback: false,
   });
 
   return {
-    introText: finalIntroText,
-    followupText: finalFollowupText,
-    usedFallback:
-      Boolean(aiResult?.usedFallback) || Boolean(repairResult?.usedFallback) || usedHardFallback,
+    ackText,
+    introText,
+    followupText,
+    usedFallback: Boolean(aiResult?.usedFallback) || Boolean(repairResult?.usedFallback),
     model: repairResult?.model || aiResult?.model || null,
     hadRepairPass: Boolean(repairResult),
-    usedHardFallback,
+    usedHardFallback: false,
   };
 }
 
@@ -954,10 +961,15 @@ async function processAnalysisForLead({
       };
     }
 
-    const firstName = toShortFirstName(currentLead?.nome || "");
     const companyName = textOrEmpty(currentLead?.empresa || "sua empresa");
-    const ackText = `Recebi suas respostas aqui, ${firstName}. To preparando a analise da ${companyName}, te mando ainda hoje.`;
-    const introText = `${firstName}, aqui esta sua Analise de Maturidade da ${companyName}`;
+    const deliveryMessages = await generateAnalysisDeliveryMessages({
+      workflow,
+      lead: currentLead,
+      form,
+    });
+    const ackText = textOrEmpty(deliveryMessages?.ackText);
+    const introText = textOrEmpty(deliveryMessages?.introText);
+    const followupText = textOrEmpty(deliveryMessages?.followupText);
 
     if (ANALYSIS_INITIAL_REPLY_DELAY_MS > 0) {
       await waitMs(ANALYSIS_INITIAL_REPLY_DELAY_MS);
@@ -978,6 +990,7 @@ async function processAnalysisForLead({
       userPrompt,
       fallbackReply:
         "Analise preliminar: existem oportunidades de melhoria em processos, uso de dados e governanca operacional. Recomendamos diagnostico aprofundado para plano de implementacao.",
+      strictNoFallback: true,
       useLangChain: false,
       allowEnvFallback: true,
       model: env.openaiModel || "gpt-4o-mini",
@@ -1028,11 +1041,6 @@ async function processAnalysisForLead({
       publicUrl: file.publicUrl,
       filename: file.filename,
       fileSizeBytes,
-    });
-
-    const followupText = buildAnalysisInsightMessage({
-      lead: currentLead,
-      form,
     });
 
     await sendLeadText({
@@ -1136,7 +1144,7 @@ async function processAnalysisForLead({
       metadata: {
         arquivoUrl: file.publicUrl,
         model: aiResult.model || null,
-        usedFallback: Boolean(aiResult.usedFallback),
+        usedFallback: Boolean(aiResult.usedFallback) || Boolean(deliveryMessages?.usedFallback),
       },
     });
 
@@ -1147,7 +1155,7 @@ async function processAnalysisForLead({
       formId: form.id,
       analysisUrl: file.publicUrl,
       aiModel: aiResult.model || null,
-      usedFallback: Boolean(aiResult.usedFallback),
+      usedFallback: Boolean(aiResult.usedFallback) || Boolean(deliveryMessages?.usedFallback),
     });
 
     return {

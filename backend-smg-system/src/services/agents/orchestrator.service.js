@@ -445,6 +445,8 @@ function getAiConfig(agent) {
     model: textOrEmpty(env.openaiModel || "gpt-4o-mini"),
     apiKey: textOrEmpty(raw.apiKey || env.openaiApiKey),
     useLangChain: raw.useLangChain !== false,
+    strictOpenAiResponses:
+      String(raw.strictOpenAiResponses || "false").trim().toLowerCase() === "true",
     humanHandoffEnabled: raw.humanHandoffEnabled !== false,
     clearMemoryCommandEnabled: raw.clearMemoryCommandEnabled !== false,
     fallbackReply:
@@ -1202,6 +1204,7 @@ async function processBufferedConversation(jobPayload) {
       systemPrompt,
       userPrompt,
       fallbackReply: aiConfig.fallbackReply,
+      strictNoFallback: aiConfig.strictOpenAiResponses,
       useLangChain: aiConfig.useLangChain,
       model: aiConfig.model,
       apiKey: aiConfig.apiKey,
@@ -1247,6 +1250,12 @@ async function processBufferedConversation(jobPayload) {
         usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
       },
     });
+
+    if (aiConfig.strictOpenAiResponses && (Boolean(aiResult?.usedFallback) || !textOrEmpty(aiResult?.text))) {
+      throw new Error(
+        "Modo estrito ativo: resposta invalida da IA (fallback ou texto vazio). Envio bloqueado."
+      );
+    }
 
     const replyTextRaw = textOrEmpty(aiResult?.text || aiConfig.fallbackReply);
     const latestLeadForGuard = await findLeadForInboundContext({

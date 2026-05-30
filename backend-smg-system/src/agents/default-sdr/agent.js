@@ -177,6 +177,9 @@ module.exports = {
     clearMemoryCommandEnabled:
       String(process.env.AGENT_DEFAULT_SDR_CLEAR_MEMORY_COMMAND || "true").toLowerCase() !==
       "false",
+    strictOpenAiResponses:
+      String(process.env.AGENT_DEFAULT_SDR_STRICT_OPENAI_RESPONSES || "true").toLowerCase() !==
+      "false",
     fallbackReply:
       "Recebi suas mensagens. Obrigado pelo contato, ja vou te ajudar com isso.",
   },

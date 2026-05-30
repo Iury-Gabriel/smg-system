@@ -170,6 +170,7 @@ async function generateAiReplyWithLangChain({
   systemPrompt,
   userPrompt,
   fallbackReply,
+  strictNoFallback = false,
   apiKey = "",
   allowEnvFallback = true,
   model = "",
@@ -188,6 +189,17 @@ async function generateAiReplyWithLangChain({
 
   const resolvedApiKey = resolveApiKey(apiKey, { allowEnvFallback });
   if (!resolvedApiKey) {
+    if (strictNoFallback) {
+      throw createAppError(
+        "OPENAI_API_KEY ausente. Modo estrito ativo: fallback local bloqueado.",
+        503,
+        {
+          source: "langchain",
+          reason: "missing_api_key",
+          strictNoFallback: true,
+        }
+      );
+    }
     logAi("warn", "langchain.request.fallback_no_key", {
       explanation: "Fallback acionado porque nao existe chave de API para LangChain.",
     });
@@ -320,6 +332,17 @@ async function generateAiReplyWithLangChain({
       }
 
       if (!text) {
+        if (strictNoFallback) {
+          throw createAppError(
+            "LangChain retornou resposta vazia. Modo estrito ativo: fallback bloqueado.",
+            502,
+            {
+              source: "langchain",
+              reason: "empty_text",
+              strictNoFallback: true,
+            }
+          );
+        }
         return {
           text: fallbackReply,
           model: modelName,
@@ -382,6 +405,18 @@ async function generateAiReplyWithLangChain({
     }
   }
 
+  if (strictNoFallback) {
+    throw createAppError(
+      "LangChain excedeu o limite de iteracoes sem resposta final. Modo estrito ativo.",
+      502,
+      {
+        source: "langchain",
+        reason: "max_iterations_reached",
+        strictNoFallback: true,
+      }
+    );
+  }
+
   return {
     text: handoffTriggered
       ? "Entendi. Vou transferir seu atendimento para um humano agora."
@@ -399,6 +434,7 @@ async function generateAiReply({
   systemPrompt,
   userPrompt,
   fallbackReply = "Recebi sua mensagem. Ja vou te responder com mais detalhes.",
+  strictNoFallback = false,
   useLangChain = false,
   apiKey = "",
   allowEnvFallback = true,
@@ -419,6 +455,17 @@ async function generateAiReply({
 
   const resolvedApiKey = resolveApiKey(apiKey, { allowEnvFallback });
   if (!resolvedApiKey) {
+    if (strictNoFallback) {
+      throw createAppError(
+        "OPENAI_API_KEY ausente. Modo estrito ativo: fallback local bloqueado.",
+        503,
+        {
+          source: useLangChain ? "langchain" : "responses_api",
+          reason: "missing_api_key",
+          strictNoFallback: true,
+        }
+      );
+    }
     logAi("warn", "request.fallback_no_key", {
       explanation: "Fallback acionado porque nao existe chave de API configurada.",
     });
@@ -439,6 +486,7 @@ async function generateAiReply({
         systemPrompt,
         userPrompt,
         fallbackReply,
+        strictNoFallback,
         apiKey: resolvedApiKey,
         allowEnvFallback,
         model,
@@ -516,6 +564,18 @@ async function generateAiReply({
 
   const text = extractResponseText(payload);
   if (!text) {
+    if (strictNoFallback) {
+      throw createAppError(
+        "OpenAI Responses API retornou texto vazio. Modo estrito ativo: fallback bloqueado.",
+        502,
+        {
+          source: "responses_api",
+          reason: "empty_text",
+          strictNoFallback: true,
+          payload,
+        }
+      );
+    }
     logAi("warn", "responses_api.empty_text_fallback", {
       explanation: "Resposta sem texto, fallback acionado.",
       model: selectedModel,
