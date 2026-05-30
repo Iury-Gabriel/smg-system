@@ -222,6 +222,7 @@ async function generateAiReplyWithLangChain({
       handoffTriggered: false,
       handoffReason: null,
       usedTools: [],
+      usedToolResults: [],
     };
   }
 
@@ -234,6 +235,7 @@ async function generateAiReplyWithLangChain({
 
   const modelName = String(model || env.openaiModel || "gpt-4o-mini").trim();
   const usedTools = [];
+  const usedToolResults = [];
   let handoffTriggered = false;
   let handoffReason = null;
 
@@ -362,6 +364,7 @@ async function generateAiReplyWithLangChain({
           handoffTriggered,
           handoffReason,
           usedTools,
+          usedToolResults,
         };
       }
 
@@ -373,6 +376,7 @@ async function generateAiReplyWithLangChain({
         handoffTriggered,
         handoffReason,
         usedTools,
+        usedToolResults,
       };
     }
 
@@ -406,6 +410,44 @@ async function generateAiReplyWithLangChain({
         }
       }
 
+      let parsedResult = null;
+      if (typeof toolResult === "string") {
+        try {
+          parsedResult = JSON.parse(toolResult);
+        } catch (_error) {
+          parsedResult = null;
+        }
+      } else if (toolResult && typeof toolResult === "object") {
+        parsedResult = toolResult;
+      }
+
+      const parsedOk =
+        parsedResult && typeof parsedResult === "object"
+          ? parsedResult.ok === undefined
+            ? parsedResult.success
+            : parsedResult.ok
+          : null;
+      const parsedError =
+        parsedResult && typeof parsedResult === "object"
+          ? parsedResult.error || parsedResult.message || null
+          : null;
+      usedToolResults.push({
+        toolName,
+        ok: parsedOk,
+        error: parsedError,
+      });
+      logAi(parsedOk === false ? "warn" : "info", "langchain.tool_call.result", {
+        explanation: "Resultado de execucao de tool chamada pela IA.",
+        toolName,
+        args: safeJson(argsObject, 1000),
+        ok: parsedOk,
+        error: parsedError,
+        resultPreview: clipText(
+          typeof toolResult === "string" ? toolResult : safeJson(toolResult, 1400),
+          1400
+        ),
+      });
+
       messages.push(
         new ToolMessage({
           content:
@@ -438,6 +480,7 @@ async function generateAiReplyWithLangChain({
     handoffTriggered,
     handoffReason,
     usedTools,
+    usedToolResults,
   };
 }
 
@@ -488,6 +531,7 @@ async function generateAiReply({
       handoffTriggered: false,
       handoffReason: null,
       usedTools: [],
+      usedToolResults: [],
     };
   }
 
@@ -513,6 +557,9 @@ async function generateAiReply({
         handoffTriggered: Boolean(result?.handoffTriggered),
         handoffReason: result?.handoffReason || null,
         usedTools: Array.isArray(result?.usedTools) ? result.usedTools : [],
+        usedToolResults: Array.isArray(result?.usedToolResults)
+          ? result.usedToolResults
+          : [],
         responseText: clipText(result?.text, 1200),
       });
       return result;
@@ -662,6 +709,7 @@ async function generateAiReply({
       handoffTriggered: false,
       handoffReason: null,
       usedTools: [],
+      usedToolResults: [],
     };
   }
 
@@ -679,6 +727,7 @@ async function generateAiReply({
     handoffTriggered: false,
     handoffReason: null,
     usedTools: [],
+    usedToolResults: [],
   };
 }
 

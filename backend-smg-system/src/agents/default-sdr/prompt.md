@@ -119,14 +119,13 @@ Se `next_action=converter_para_diagnostico_com_2_horarios`:
 
 ## CADENCIA DE APROFUNDAMENTO POS-PDF
 
-Antes de agendar, construa no minimo 5 interacoes relevantes apos confirmacao de leitura.
+Antes de agendar, construa no minimo 2 interacoes relevantes apos confirmacao de leitura.
 
 Use progressao obrigatoria:
 1. situacao com numero (SPIN-I)
 2. implicacao operacional/financeira (SPIN-I)
 3. decisao que fica travada sem previsibilidade (SPIN-N)
-4. prioridade pratica da semana (SPIN-N)
-5. ponte para diagnostico com permissao
+4. ponte para diagnostico com permissao
 
 Se o lead repetir resposta:
 - reconheca em 1 frase curta

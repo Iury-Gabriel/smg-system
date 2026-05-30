@@ -37,6 +37,14 @@ const CLEAR_RESET_TX_OPTIONS = {
 const CLEAR_RESET_MAX_ATTEMPTS = 2;
 const AGENT_INITIAL_REPLY_DELAY_MS = Math.max(0, Number(env.agentInitialReplyDelayMs || 0));
 const AGENT_INTER_MESSAGE_DELAY_MS = Math.max(0, Number(env.agentInterMessageDelayMs || 0));
+const WF2_MIN_POST_READ_INTERACTIONS = Math.max(
+  0,
+  Number(process.env.WF2_MIN_POST_READ_INTERACTIONS || 2)
+);
+const WF2_PERMISSION_POST_READ_INTERACTIONS = Math.max(
+  WF2_MIN_POST_READ_INTERACTIONS + 1,
+  Number(process.env.WF2_PERMISSION_POST_READ_INTERACTIONS || 3)
+);
 
 function logOrchestrator(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -377,9 +385,9 @@ function mapWf2OperationalContext(lead = null) {
     nextAction = "confirmar_leitura_da_analise_sem_reapresentacao";
   } else if (status === "ANALISE_ENVIADA") {
     const count = Number(analysis.post_read_interaction_count || 0);
-    if (count < 4) {
+    if (count < WF2_MIN_POST_READ_INTERACTIONS) {
       nextAction = "aprofundar_antes_de_agendar_sem_horarios";
-    } else if (count < 5) {
+    } else if (count < WF2_PERMISSION_POST_READ_INTERACTIONS) {
       nextAction = "pedir_permissao_para_enviar_horarios";
     } else {
       nextAction = "converter_para_diagnostico_com_2_horarios";
@@ -1321,6 +1329,9 @@ async function processBufferedConversation(jobPayload) {
       usedLangChain: Boolean(aiResult?.usedLangChain),
       handoffTriggered: Boolean(aiResult?.handoffTriggered),
       usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+      usedToolResults: Array.isArray(aiResult?.usedToolResults)
+        ? aiResult.usedToolResults
+        : [],
       responseText: textOrEmpty(aiResult?.text).slice(0, 1200),
     });
     await logExecutionEvent(workflow, executionRun?.id, {
@@ -1334,6 +1345,9 @@ async function processBufferedConversation(jobPayload) {
         usedLangChain: Boolean(aiResult?.usedLangChain),
         handoffTriggered: Boolean(aiResult?.handoffTriggered),
         usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+        usedToolResults: Array.isArray(aiResult?.usedToolResults)
+          ? aiResult.usedToolResults
+          : [],
       },
     });
 
@@ -1503,6 +1517,9 @@ async function processBufferedConversation(jobPayload) {
       handoffReason: aiResult?.handoffReason || null,
       pausedSessionId: pausedSessionFromTool?.id || null,
       usedTools: Array.isArray(aiResult?.usedTools) ? aiResult.usedTools : [],
+      usedToolResults: Array.isArray(aiResult?.usedToolResults)
+        ? aiResult.usedToolResults
+        : [],
     });
     if (executionRun?.id) {
       await finishExecutionRun({

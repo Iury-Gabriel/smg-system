@@ -40,6 +40,14 @@ const ANALYSIS_INITIAL_REPLY_DELAY_MS = Math.max(
   0,
   Number(env.wf2AnalysisInitialReplyDelayMs || process.env.WF2_ANALYSIS_INITIAL_REPLY_DELAY_MS || 10000)
 );
+const WF2_MIN_POST_READ_INTERACTIONS = Math.max(
+  0,
+  Number(process.env.WF2_MIN_POST_READ_INTERACTIONS || 2)
+);
+const WF2_PERMISSION_POST_READ_INTERACTIONS = Math.max(
+  WF2_MIN_POST_READ_INTERACTIONS + 1,
+  Number(process.env.WF2_PERMISSION_POST_READ_INTERACTIONS || 3)
+);
 const analysisInFlightLocks = new Set();
 const OPT_OUT_REGEX = /\b(parar|sair|remover|nao quero|não quero|stop|cancelar|opt[\s-]?out)\b/i;
 const START_SEGMENT_ALIASES = {
@@ -2162,7 +2170,9 @@ async function registerInboundMessageEvent({
     const currentCount = Number(leadForNextStep?.dadosBrutos?.wf2?.analysisPostReadInteractionCount || 0);
     const nextCount = currentCount + 1;
     const nextStep =
-      nextCount >= 5 ? "micro_approfundamento_ready_for_scheduling" : "micro_approfundamento_pending";
+      nextCount >= WF2_PERMISSION_POST_READ_INTERACTIONS
+        ? "micro_approfundamento_ready_for_scheduling"
+        : "micro_approfundamento_pending";
 
     leadForNextStep = await tables.lead.update({
       where: { id: leadForNextStep.id },

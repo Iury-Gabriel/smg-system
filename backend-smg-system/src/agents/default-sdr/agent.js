@@ -9,6 +9,10 @@ const FORM_LINK =
       "https://sistema.smgcompany.com.br/diagnostico";
 const DEFAULT_PIPELINE_ORIGIN = process.env.AGENT_DEFAULT_SDR_PIPELINE_ORIGIN || "automacao";
 const DEFAULT_CHANNEL = process.env.AGENT_DEFAULT_SDR_CHANNEL || "scrap_smg";
+const WF2_MIN_POST_READ_INTERACTIONS = Math.max(
+  0,
+  Number(process.env.WF2_MIN_POST_READ_INTERACTIONS || 2)
+);
 
 function normalizeDigits(value) {
   return String(value || "").replace(/[^\d]/g, "");
@@ -714,15 +718,16 @@ module.exports = {
                 "Agendamento bloqueado: confirme primeiro que o lead abriu a analise antes de sugerir horarios.",
             };
           }
-          if (postReadCount < 5) {
+          if (postReadCount < WF2_MIN_POST_READ_INTERACTIONS) {
             log("warn", "wf2.schedule.blocked.post_read_depth", {
               leadId: lead.id,
               postReadCount,
+              minRequired: WF2_MIN_POST_READ_INTERACTIONS,
             });
             return {
               ok: false,
               error:
-                "Agendamento bloqueado: faca micro-aprofundamento com pelo menos 5 interacoes relevantes apos a leitura da analise.",
+                `Agendamento bloqueado: faca micro-aprofundamento com pelo menos ${WF2_MIN_POST_READ_INTERACTIONS} interacoes relevantes apos a leitura da analise.`,
             };
           }
 
