@@ -327,22 +327,39 @@ async function findLeadForInboundContext({ tables, senderNumber, agentSlug = "" 
     where.agentSlug = normalizedAgentSlug;
   }
 
-  const firstMatch = await tables.lead.findFirst({
+  const pickMostRecentLead = (rows = []) => {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const sorted = [...rows].sort((a, b) => {
+      const aInteraction = a?.ultimaInteracao ? new Date(a.ultimaInteracao).getTime() : 0;
+      const bInteraction = b?.ultimaInteracao ? new Date(b.ultimaInteracao).getTime() : 0;
+      if (bInteraction !== aInteraction) return bInteraction - aInteraction;
+      const aCreated = a?.criadoEm ? new Date(a.criadoEm).getTime() : 0;
+      const bCreated = b?.criadoEm ? new Date(b.criadoEm).getTime() : 0;
+      return bCreated - aCreated;
+    });
+    return sorted[0];
+  };
+
+  const scopedMatches = await tables.lead.findMany({
     where,
-    orderBy: { criadoEm: "desc" },
+    orderBy: [{ ultimaInteracao: "desc" }, { criadoEm: "desc" }],
+    take: 30,
   });
-  if (firstMatch || normalizedAgentSlug) {
-    return firstMatch;
+  const scopedWinner = pickMostRecentLead(scopedMatches);
+  if (scopedWinner || normalizedAgentSlug) {
+    return scopedWinner;
   }
 
-  return tables.lead.findFirst({
+  const fallbackMatches = await tables.lead.findMany({
     where: {
       telefone: {
         in: candidates,
       },
     },
-    orderBy: { criadoEm: "desc" },
+    orderBy: [{ ultimaInteracao: "desc" }, { criadoEm: "desc" }],
+    take: 30,
   });
+  return pickMostRecentLead(fallbackMatches);
 }
 
 function mapFormularioPayload(form) {
@@ -1595,16 +1612,30 @@ async function clearConversationAndPendingBuffer({
   const normalizedDestination =
     normalizeE164(destination) || normalizePhone(destination) || textOrEmpty(destination);
 
-  const lead = await findLeadForInboundContext({
-    tables,
-    senderNumber: normalizedDestination || destination,
-    agentSlug: agent.slug,
-  });
+  const phoneCandidates = buildPhoneCandidates(normalizedDestination || destination);
+  const normalizedAgentSlug = textOrEmpty(agent.slug);
+  const leadWhere = {
+    telefone: {
+      in: phoneCandidates,
+    },
+  };
+  if (normalizedAgentSlug) {
+    leadWhere.agentSlug = normalizedAgentSlug;
+  }
+  const leadsForClear = phoneCandidates.length
+    ? await tables.lead.findMany({
+        where: leadWhere,
+        orderBy: [{ ultimaInteracao: "desc" }, { criadoEm: "desc" }],
+        take: 50,
+      })
+    : [];
 
   let leadReset = {
     foundLead: false,
     leadId: null,
     status: null,
+    leadIds: [],
+    leadsCleared: 0,
     timelineDeleted: 0,
     crmDeleted: 0,
     analysesDeleted: 0,
@@ -1612,12 +1643,14 @@ async function clearConversationAndPendingBuffer({
     tasksDeleted: 0,
   };
 
-  if (lead) {
-    const linkedFormId = textOrEmpty(lead.diagnosticoFormularioId) || null;
-    const phoneCandidates = buildPhoneCandidates(normalizedDestination);
+  if (leadsForClear.length) {
+    const leadIds = leadsForClear.map((item) => item.id);
+    const linkedFormIds = leadsForClear
+      .map((item) => textOrEmpty(item.diagnosticoFormularioId))
+      .filter(Boolean);
     const formDeleteWhereOr = [];
-    if (linkedFormId) {
-      formDeleteWhereOr.push({ id: linkedFormId });
+    for (const formId of linkedFormIds) {
+      formDeleteWhereOr.push({ id: formId });
     }
     for (const candidate of phoneCandidates) {
       const normalizedCandidate = textOrEmpty(candidate);
@@ -1635,19 +1668,25 @@ async function clearConversationAndPendingBuffer({
             const timelineDelete = await tx.leadAutomacaoTimeline.deleteMany({
               where: {
                 workflow,
-                leadId: lead.id,
+                leadId: {
+                  in: leadIds,
+                },
               },
             });
             const crmDelete = await tx.leadCrm.deleteMany({
               where: {
                 workflow,
-                leadId: lead.id,
+                leadId: {
+                  in: leadIds,
+                },
               },
             });
             const analysisDelete = await tx.analiseMaturidade.deleteMany({
               where: {
                 workflow,
-                leadId: lead.id,
+                leadId: {
+                  in: leadIds,
+                },
               },
             });
             const formDelete = formDeleteWhereOr.length
@@ -1661,33 +1700,39 @@ async function clearConversationAndPendingBuffer({
             const tasksDelete = await tx.taskComercial.deleteMany({
               where: {
                 workflow,
-                leadId: lead.id,
-              },
-            });
-            const updatedLead = await txTables.lead.update({
-              where: { id: lead.id },
-              data: {
-                status: "NOVO_LEAD",
-                automationActive: true,
-                formularioPreenchido: false,
-                diagnosticoFormularioId: null,
-                ultimaInteracao: new Date(),
-                ultimoEnvioIa: null,
-                proximoFollowupEm: null,
-                followupNivel: 0,
-                dadosBrutos: {
-                  wf2: {
-                    resetByClearCommand: true,
-                    resetAt,
-                    previousStatus: String(lead.status || "").trim() || null,
-                    fullDataCleared: true,
-                  },
+                leadId: {
+                  in: leadIds,
                 },
               },
             });
+            const updatedLeads = [];
+            for (const leadItem of leadsForClear) {
+              const updatedLead = await txTables.lead.update({
+                where: { id: leadItem.id },
+                data: {
+                  status: "NOVO_LEAD",
+                  automationActive: true,
+                  formularioPreenchido: false,
+                  diagnosticoFormularioId: null,
+                  ultimaInteracao: new Date(),
+                  ultimoEnvioIa: null,
+                  proximoFollowupEm: null,
+                  followupNivel: 0,
+                  dadosBrutos: {
+                    wf2: {
+                      resetByClearCommand: true,
+                      resetAt,
+                      previousStatus: String(leadItem.status || "").trim() || null,
+                      fullDataCleared: true,
+                    },
+                  },
+                },
+              });
+              updatedLeads.push(updatedLead);
+            }
 
             return {
-              updatedLead,
+              updatedLeads,
               timelineDeleted: Number(timelineDelete?.count || 0),
               crmDeleted: Number(crmDelete?.count || 0),
               analysesDeleted: Number(analysisDelete?.count || 0),
@@ -1707,7 +1752,7 @@ async function clearConversationAndPendingBuffer({
         logOrchestrator("warn", "clear.reset.retry_after_tx_timeout", {
           agentSlug: agent.slug,
           workflow,
-          leadId: lead.id,
+          leadIds,
           attempt,
           maxAttempts: CLEAR_RESET_MAX_ATTEMPTS,
           message: error?.message || "unknown",
@@ -1717,8 +1762,17 @@ async function clearConversationAndPendingBuffer({
 
     leadReset = {
       foundLead: true,
-      leadId: transactionResult?.updatedLead?.id || lead.id,
-      status: transactionResult?.updatedLead?.status || "NOVO_LEAD",
+      leadId:
+        transactionResult?.updatedLeads?.[0]?.id ||
+        leadsForClear[0]?.id ||
+        null,
+      status: transactionResult?.updatedLeads?.[0]?.status || "NOVO_LEAD",
+      leadIds: Array.isArray(transactionResult?.updatedLeads)
+        ? transactionResult.updatedLeads.map((item) => item.id)
+        : leadIds,
+      leadsCleared: Array.isArray(transactionResult?.updatedLeads)
+        ? transactionResult.updatedLeads.length
+        : leadIds.length,
       timelineDeleted: Number(transactionResult?.timelineDeleted || 0),
       crmDeleted: Number(transactionResult?.crmDeleted || 0),
       analysesDeleted: Number(transactionResult?.analysesDeleted || 0),
