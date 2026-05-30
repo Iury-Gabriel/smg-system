@@ -113,6 +113,73 @@ function parseValidDate(value) {
   return parsed;
 }
 
+function parseNaturalScheduleDate(rawValue = "", baseDate = new Date()) {
+  const raw = normalizeIntentText(rawValue);
+  if (!raw) return null;
+
+  const timeMatch = raw.match(/\b(?:as\s*)?([01]?\d|2[0-3])(?:[:h]([0-5]\d))?\s*h?\b/);
+  const hour = timeMatch ? Number(timeMatch[1]) : null;
+  const minute = timeMatch && timeMatch[2] !== undefined ? Number(timeMatch[2]) : 0;
+  if (hour === null || Number.isNaN(hour) || Number.isNaN(minute)) {
+    return null;
+  }
+
+  const candidate = new Date(baseDate);
+  candidate.setSeconds(0, 0);
+  candidate.setHours(hour, minute, 0, 0);
+
+  const explicitDate = raw.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (explicitDate) {
+    const day = Number(explicitDate[1]);
+    const month = Number(explicitDate[2]);
+    const yearRaw = explicitDate[3] ? Number(explicitDate[3]) : baseDate.getFullYear();
+    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+    const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  if (/\bamanha\b/.test(raw)) {
+    candidate.setDate(candidate.getDate() + 1);
+    return candidate;
+  }
+  if (/\bhoje\b/.test(raw)) {
+    if (candidate.getTime() <= baseDate.getTime()) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return candidate;
+  }
+
+  const weekdayMap = {
+    segunda: 1,
+    seg: 1,
+    terca: 2,
+    ter: 2,
+    quarta: 3,
+    qua: 3,
+    quinta: 4,
+    qui: 4,
+    sexta: 5,
+    sex: 5,
+    sabado: 6,
+    sab: 6,
+    domingo: 0,
+    dom: 0,
+  };
+
+  const weekdayToken =
+    Object.keys(weekdayMap).find((token) => new RegExp(`\\b${token}\\b`).test(raw)) || "";
+  if (!weekdayToken) return null;
+
+  const targetDow = weekdayMap[weekdayToken];
+  const currentDow = baseDate.getDay();
+  let deltaDays = (targetDow - currentDow + 7) % 7;
+  if (deltaDays === 0 && candidate.getTime() <= baseDate.getTime()) {
+    deltaDays = 7;
+  }
+  candidate.setDate(candidate.getDate() + deltaDays);
+  return candidate;
+}
+
 function normalizeIntentText(value = "") {
   return String(value || "")
     .toLowerCase()
@@ -335,6 +402,13 @@ module.exports = {
           const normalizedStatus = String(status || "").trim().toUpperCase();
           if (!normalizedStatus) {
             return { ok: false, error: "status obrigatorio." };
+          }
+          if (normalizedStatus === "DIAGNOSTICO_AGENDADO") {
+            return {
+              ok: false,
+              error:
+                "Atualizacao manual para DIAGNOSTICO_AGENDADO bloqueada. Use wf2_schedule_diagnosis.",
+            };
           }
 
           let lead = null;
@@ -595,7 +669,8 @@ module.exports = {
           scheduled_at_iso: {
             type: "string",
             required: true,
-            description: "Data/hora do diagnostico em ISO-8601.",
+            description:
+              "Data/hora do diagnostico. Preferir ISO-8601, mas aceita texto natural como 'segunda 10h' ou 'amanha 14h'.",
           },
           note: {
             type: "string",
@@ -606,6 +681,9 @@ module.exports = {
         handler: async ({ scheduled_at_iso, note }) => {
           const lead = await findLeadByPhone(tables, senderNumber);
           if (!lead) {
+            log("warn", "wf2.schedule.blocked.lead_not_found", {
+              senderNumber,
+            });
             return { ok: false, error: "Lead nao encontrado para registrar agendamento." };
           }
 
@@ -614,6 +692,10 @@ module.exports = {
           const waitingRead = Boolean(wf2.analysisAwaitingReadConfirmation);
           const postReadCount = Number(wf2.analysisPostReadInteractionCount || 0);
           if (String(lead.status || "").toUpperCase() !== "ANALISE_ENVIADA") {
+            log("warn", "wf2.schedule.blocked.invalid_status", {
+              leadId: lead.id,
+              status: String(lead.status || "").toUpperCase(),
+            });
             return {
               ok: false,
               error:
@@ -621,6 +703,11 @@ module.exports = {
             };
           }
           if (!readConfirmed || waitingRead) {
+            log("warn", "wf2.schedule.blocked.read_confirmation_missing", {
+              leadId: lead.id,
+              readConfirmed,
+              waitingRead,
+            });
             return {
               ok: false,
               error:
@@ -628,6 +715,10 @@ module.exports = {
             };
           }
           if (postReadCount < 5) {
+            log("warn", "wf2.schedule.blocked.post_read_depth", {
+              leadId: lead.id,
+              postReadCount,
+            });
             return {
               ok: false,
               error:
@@ -649,6 +740,10 @@ module.exports = {
           });
           const recentHumanText = String(recentHumanMessage?.content || "").trim();
           if (!hasExplicitScheduleConsent(recentHumanText)) {
+            log("warn", "wf2.schedule.blocked.no_explicit_consent", {
+              leadId: lead.id,
+              recentHumanText,
+            });
             return {
               ok: false,
               error:
@@ -660,12 +755,28 @@ module.exports = {
           if (!scheduledAtRaw) {
             return { ok: false, error: "scheduled_at_iso obrigatorio." };
           }
-          const scheduledAtDate = parseValidDate(scheduledAtRaw);
+          const now = new Date();
+          const scheduledAtDate =
+            parseValidDate(scheduledAtRaw) ||
+            parseNaturalScheduleDate(scheduledAtRaw, now) ||
+            parseNaturalScheduleDate(recentHumanText, now);
           if (!scheduledAtDate) {
+            log("warn", "wf2.schedule.blocked.invalid_datetime_input", {
+              leadId: lead.id,
+              scheduledAtRaw,
+              recentHumanText,
+            });
             return {
               ok: false,
               error:
-                "scheduled_at_iso invalido. Envie no padrao ISO-8601, ex: 2026-04-24T15:00:00-03:00.",
+                "Data/hora invalida. Envie em ISO-8601 (ex: 2026-04-24T15:00:00-03:00) ou texto como 'segunda 10h'.",
+            };
+          }
+          if (scheduledAtDate.getTime() <= now.getTime()) {
+            return {
+              ok: false,
+              error:
+                "Horario informado esta no passado. Confirme um horario futuro para registrar o diagnostico.",
             };
           }
           const noteText = String(note || "").trim();
@@ -759,6 +870,7 @@ module.exports = {
               dataPrevista: crm.dataPrevista,
             },
             notificationsCreated: notifications.length,
+            scheduledAtIso: scheduledAtDate.toISOString(),
           };
         },
       },

@@ -95,12 +95,20 @@ function containsSchedulingConfirmationClaim(text = "") {
   );
 }
 
-function sanitizeSchedulingClaimIfNeeded({ text = "", leadStatus = "" }) {
+function sanitizeSchedulingClaimIfNeeded({
+  text = "",
+  leadStatus = "",
+  attemptedScheduleTool = false,
+}) {
   const safeText = textOrEmpty(text);
   const status = String(leadStatus || "").trim().toUpperCase();
   if (!safeText) return safeText;
   if (status === "DIAGNOSTICO_AGENDADO") return safeText;
   if (!containsSchedulingConfirmationClaim(safeText)) return safeText;
+
+  if (attemptedScheduleTool) {
+    return "Perfeito. Recebi seu horario e estou finalizando o registro. So me confirma se mantemos esse horario para eu concluir agora.";
+  }
 
   return [
     "Perfeito, faz sentido avancarmos.",
@@ -1349,6 +1357,9 @@ async function processBufferedConversation(jobPayload) {
     const replyTextAfterClaimGuard = sanitizeSchedulingClaimIfNeeded({
       text: replyTextRaw,
       leadStatus: latestLeadForGuard?.status || inboundContext?.payload?.lead?.status || "",
+      attemptedScheduleTool: Array.isArray(aiResult?.usedTools)
+        ? aiResult.usedTools.includes("wf2_schedule_diagnosis")
+        : false,
     });
     if (replyTextAfterClaimGuard !== replyTextRaw) {
       logOrchestrator("warn", "buffer.process.reply_scheduling_claim_sanitized", {
