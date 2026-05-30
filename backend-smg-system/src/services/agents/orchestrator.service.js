@@ -118,10 +118,7 @@ function sanitizeSchedulingClaimIfNeeded({
     return "Perfeito. Recebi seu horario e estou finalizando o registro. So me confirma se mantemos esse horario para eu concluir agora.";
   }
 
-  return [
-    "Perfeito, faz sentido avancarmos.",
-    "Antes de registrar o agendamento, te passo duas opcoes de horario para voce escolher.",
-  ].join(" ");
+  return "Perfeito. Ainda nao consegui confirmar o agendamento no sistema. Me confirma o horario desejado para eu concluir por aqui.";
 }
 
 function containsScheduleOffering(text = "") {
@@ -145,14 +142,8 @@ function sanitizeScheduleOfferingByNextAction({ text = "", nextAction = "" }) {
   const safeText = textOrEmpty(text);
   const action = String(nextAction || "").trim();
   if (!safeText) return safeText;
-  if (action === "converter_para_diagnostico_com_2_horarios") return safeText;
-  if (!containsScheduleOffering(safeText)) return safeText;
-
-  if (action === "pedir_permissao_para_enviar_horarios") {
-    return "Faz sentido. Posso te mandar duas opcoes de horario para voce escolher?";
-  }
-
-  return "Entendi. Antes de falarmos de agenda, quero aprofundar mais um ponto rapido para te orientar melhor.";
+  if (!action) return safeText;
+  return safeText;
 }
 
 function normalizeForComparison(text = "") {
@@ -223,13 +214,6 @@ function sanitizeDuplicateReplyByHistory({ text = "", historyItems = [], nextAct
     return safeText;
   }
 
-  const action = String(nextAction || "").trim();
-  if (action === "pedir_permissao_para_enviar_horarios") {
-    return "Faz sentido. Posso te mandar duas opcoes de horario para voce escolher?";
-  }
-  if (action === "converter_para_diagnostico_com_2_horarios") {
-    return "Perfeito. Tenho dois horarios em dias diferentes para facilitar sua escolha. Quer que eu te passe agora?";
-  }
   return "Perfeito, e um ponto importante. Pra aprofundar por outro angulo: hoje, qual impacto disso nas decisoes da sua proxima semana?";
 }
 
