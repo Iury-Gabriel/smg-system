@@ -78,6 +78,14 @@ const INBOUND_WELCOME_TEMPLATE =
 const INBOUND_FORM_LINK_TEMPLATE =
   "Para comecarmos, preencha esse formulario rapido para eu personalizar sua analise:\n{form_link}";
 const AI_TEXT_MAX_CHARS = 420;
+const WF2_OPERATIONAL_SYSTEM_PROMPT = [
+  "Voce e Clara, consultora comercial da SMG.",
+  "Seu canal e WhatsApp com donos e gestores de pequenas e medias empresas no Brasil.",
+  "Escreva sempre em pt-BR natural, humano, direto e consultivo.",
+  "Nunca use markdown, listas, emoji, aspas extras ou placeholders.",
+  "Nao invente dados, links, horarios, status, promessas ou resultados.",
+  "Mantenha intencao comercial clara e mensagem curta.",
+].join(" ");
 
 function logWf2(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -1584,8 +1592,7 @@ async function rewriteWf2TextWithAi({
   ].join("\n");
 
   const aiResult = await generateAiReply({
-    systemPrompt:
-      "Voce e Clara, consultora comercial da SMG. Escreva mensagens curtas de WhatsApp com linguagem natural.",
+    systemPrompt: WF2_OPERATIONAL_SYSTEM_PROMPT,
     userPrompt,
     fallbackReply: "",
     strictNoFallback: true,
@@ -1634,8 +1641,7 @@ async function buildInboundWelcomeMessages({ lead, agent, workflow }) {
   ].join("\n");
 
   const aiResult = await generateAiReply({
-    systemPrompt:
-      "Voce escreve mensagens comerciais curtas no WhatsApp para a Clara da SMG.",
+    systemPrompt: WF2_OPERATIONAL_SYSTEM_PROMPT,
     userPrompt: aiPrompt,
     fallbackReply: "{}",
     strictNoFallback: true,
@@ -1655,29 +1661,19 @@ async function buildInboundWelcomeMessages({ lead, agent, workflow }) {
     throw new Error("OpenAI nao incluiu o link oficial do formulario na msg2 inbound.");
   }
 
-  const finalMsg1 = await rewriteWf2TextWithAi({
-    text: msg1,
-    workflow,
-    lead,
-    purpose: "inbound_welcome_msg1",
-    maxChars: 260,
-  });
-  const finalMsg2 = await rewriteWf2TextWithAi({
-    text: msg2,
-    workflow,
-    lead,
-    purpose: "inbound_welcome_msg2",
-    maxChars: 360,
-    mustInclude: [formLink],
-  });
+  if (msg1.length > 260) {
+    throw new Error("OpenAI retornou msg1 de boas-vindas acima do limite de 260 caracteres.");
+  }
+  if (msg2.length > 360) {
+    throw new Error("OpenAI retornou msg2 de boas-vindas acima do limite de 360 caracteres.");
+  }
 
-  return [finalMsg1, finalMsg2];
+  return [msg1, msg2];
 }
 
 async function buildOptOutReplyMessage({ workflow, lead }) {
   const aiResult = await generateAiReply({
-    systemPrompt:
-      "Voce e Clara, do time comercial da SMG. Responda em pt-BR curto e humano.",
+    systemPrompt: WF2_OPERATIONAL_SYSTEM_PROMPT,
     userPrompt: [
       "Escreva uma mensagem curta para confirmar opt-out do lead.",
       "Objetivo: confirmar que os contatos serao encerrados agora e que ele pode chamar no futuro se quiser retomar.",

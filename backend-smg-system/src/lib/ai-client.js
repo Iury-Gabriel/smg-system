@@ -37,6 +37,17 @@ function createAppError(message, statusCode = 500, details = null) {
   return error;
 }
 
+async function waitMs(ms = 0) {
+  const safeMs = Math.max(0, Number(ms) || 0);
+  if (!safeMs) return;
+  await new Promise((resolve) => setTimeout(resolve, safeMs));
+}
+
+function isRetryableOpenAiStatus(statusCode) {
+  const code = Number(statusCode || 0);
+  return code === 408 || code === 409 || code === 429 || code >= 500;
+}
+
 async function parseJsonSafe(response) {
   try {
     return await response.json();
@@ -527,33 +538,96 @@ async function generateAiReply({
     /\/+$/,
     ""
   );
-  const response = await fetch(`${base}/responses`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${resolvedApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: selectedModel,
-      input: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-    }),
-  });
+  const maxAttempts = Math.max(1, Number(process.env.OPENAI_RESPONSE_MAX_RETRIES || 3));
+  let response = null;
+  let payload = null;
+  let lastNetworkError = null;
 
-  const payload = await parseJsonSafe(response);
-  logAi(response.ok ? "info" : "warn", "responses_api.http_response", {
-    explanation: "Resposta HTTP da OpenAI Responses API.",
-    status: response.status,
-    payload: safeJson(payload),
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      response = await fetch(`${base}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${resolvedApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: selectedModel,
+          input: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: userPrompt,
+            },
+          ],
+        }),
+      });
+      payload = await parseJsonSafe(response);
+    } catch (error) {
+      lastNetworkError = error;
+      logAi("warn", "responses_api.network_error", {
+        explanation: "Erro de rede ao chamar OpenAI Responses API.",
+        attempt,
+        maxAttempts,
+        message: error?.message || "unknown",
+      });
+      if (attempt < maxAttempts) {
+        await waitMs(500 * attempt);
+        continue;
+      }
+      throw createAppError(
+        error?.message || "Falha de rede ao processar resposta com IA.",
+        502,
+        {
+          source: "responses_api",
+          reason: "network_error",
+        }
+      );
+    }
+
+    logAi(response.ok ? "info" : "warn", "responses_api.http_response", {
+      explanation: "Resposta HTTP da OpenAI Responses API.",
+      status: response.status,
+      attempt,
+      maxAttempts,
+      payload: safeJson(payload),
+    });
+
+    if (response.ok) {
+      break;
+    }
+
+    if (isRetryableOpenAiStatus(response.status) && attempt < maxAttempts) {
+      const retryAfterHeader = Number(response.headers?.get?.("retry-after") || 0);
+      const retryDelayMs = retryAfterHeader > 0 ? retryAfterHeader * 1000 : 600 * attempt;
+      logAi("warn", "responses_api.retrying", {
+        explanation: "Falha transitória da OpenAI. Nova tentativa agendada.",
+        attempt,
+        nextAttempt: attempt + 1,
+        status: response.status,
+        retryDelayMs,
+      });
+      await waitMs(retryDelayMs);
+      continue;
+    }
+
+    break;
+  }
+
+  if (!response) {
+    throw createAppError(
+      lastNetworkError?.message || "Falha ao processar resposta com IA.",
+      502,
+      {
+        source: "responses_api",
+        reason: "no_response",
+      }
+    );
+  }
+
   if (!response.ok) {
     throw createAppError(
       payload?.error?.message || "Falha ao processar resposta com IA.",
