@@ -273,31 +273,48 @@ async function findLeadByPhone(tables, phoneNumber, agentSlug = "") {
   const candidates = buildPhoneCandidates(phoneNumber);
   if (!candidates.length) return null;
 
-  const where = {
+  const whereWithAgent = {
     telefone: {
       in: candidates,
     },
   };
   if (textOrEmpty(agentSlug)) {
-    where.agentSlug = textOrEmpty(agentSlug);
+    whereWithAgent.agentSlug = textOrEmpty(agentSlug);
   }
 
-  const firstMatch = await tables.lead.findFirst({
-    where,
+  const pickMostRecentLead = (rows = []) => {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const sorted = [...rows].sort((a, b) => {
+      const aInteraction = a?.ultimaInteracao ? new Date(a.ultimaInteracao).getTime() : 0;
+      const bInteraction = b?.ultimaInteracao ? new Date(b.ultimaInteracao).getTime() : 0;
+      if (bInteraction !== aInteraction) return bInteraction - aInteraction;
+      const aCreated = a?.criadoEm ? new Date(a.criadoEm).getTime() : 0;
+      const bCreated = b?.criadoEm ? new Date(b.criadoEm).getTime() : 0;
+      return bCreated - aCreated;
+    });
+    return sorted[0];
+  };
+
+  const scopedMatches = await tables.lead.findMany({
+    where: whereWithAgent,
     orderBy: { criadoEm: "desc" },
+    take: 30,
   });
-  if (firstMatch || !textOrEmpty(agentSlug)) {
-    return firstMatch;
+  const scopedWinner = pickMostRecentLead(scopedMatches);
+  if (scopedWinner || !textOrEmpty(agentSlug)) {
+    return scopedWinner;
   }
 
-  return tables.lead.findFirst({
+  const fallbackMatches = await tables.lead.findMany({
     where: {
       telefone: {
         in: candidates,
       },
     },
     orderBy: { criadoEm: "desc" },
+    take: 30,
   });
+  return pickMostRecentLead(fallbackMatches);
 }
 
 async function findLatestDiagnosticoByPhone(prisma, workflow, phoneNumber) {
@@ -1731,6 +1748,14 @@ async function createInboundLeadFromMessage({
   const normalizedPhone = normalizeE164(phoneNumber);
   if (!normalizedPhone) {
     return null;
+  }
+  const existingLead = await findLeadByPhone(
+    tables,
+    normalizedPhone,
+    textOrEmpty(agentSlug || "default-sdr")
+  );
+  if (existingLead) {
+    return existingLead;
   }
 
   const inboundName = normalizeInboundProfileName(profileName) || "Lead Inbound WhatsApp";

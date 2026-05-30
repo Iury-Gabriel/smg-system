@@ -49,28 +49,15 @@ async function findLeadByPhone(tables, rawPhone) {
     take: 20,
   });
   if (!leads.length) return null;
-
-  const terminalStatuses = new Set(["DIAGNOSTICO_AGENDADO", "DESQUALIFICADO"]);
-  const scored = leads
-    .map((lead) => {
-      const status = String(lead?.status || "").trim().toUpperCase();
-      const wf2 = lead?.dadosBrutos?.wf2 || {};
-      let score = 0;
-
-      if (!terminalStatuses.has(status)) score += 1000;
-      if (Boolean(lead?.automationActive)) score += 300;
-      if (status === "ANALISE_ENVIADA") score += 200;
-      if (status === "FORMULARIO_RESPONDIDO") score += 150;
-      if (status === "FORMULARIO_ENVIADO") score += 120;
-      if (status === "NOVO_LEAD") score += 80;
-      if (Boolean(wf2?.analysisReadConfirmedAt)) score += 40;
-      if (Boolean(wf2?.analysisAwaitingReadConfirmation)) score -= 10;
-
-      return { lead, score };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  return scored[0].lead;
+  const sorted = [...leads].sort((a, b) => {
+    const aInteraction = a?.ultimaInteracao ? new Date(a.ultimaInteracao).getTime() : 0;
+    const bInteraction = b?.ultimaInteracao ? new Date(b.ultimaInteracao).getTime() : 0;
+    if (bInteraction !== aInteraction) return bInteraction - aInteraction;
+    const aCreated = a?.criadoEm ? new Date(a.criadoEm).getTime() : 0;
+    const bCreated = b?.criadoEm ? new Date(b.criadoEm).getTime() : 0;
+    return bCreated - aCreated;
+  });
+  return sorted[0];
 }
 
 function buildLeadSummary(lead) {
