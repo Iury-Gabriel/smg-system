@@ -446,7 +446,7 @@ function getAiConfig(agent) {
     apiKey: textOrEmpty(raw.apiKey || env.openaiApiKey),
     useLangChain: raw.useLangChain !== false,
     strictOpenAiResponses:
-      String(raw.strictOpenAiResponses || "false").trim().toLowerCase() === "true",
+      String(raw.strictOpenAiResponses || "true").trim().toLowerCase() === "true",
     humanHandoffEnabled: raw.humanHandoffEnabled !== false,
     clearMemoryCommandEnabled: raw.clearMemoryCommandEnabled !== false,
     fallbackReply:
@@ -1257,7 +1257,7 @@ async function processBufferedConversation(jobPayload) {
       );
     }
 
-    const replyTextRaw = textOrEmpty(aiResult?.text || aiConfig.fallbackReply);
+    const replyTextRaw = textOrEmpty(aiResult?.text);
     const latestLeadForGuard = await findLeadForInboundContext({
       tables,
       senderNumber,

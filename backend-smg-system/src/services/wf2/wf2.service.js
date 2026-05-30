@@ -12,7 +12,6 @@ const { listAgents, getAgentOrThrow, getAgentProviderConfig } = require("../agen
 const { normalizeProvider } = require("../agents/helpers");
 const {
   sendMetaTextMessage,
-  sendMetaTemplateMessage,
   sendMetaDocumentMessage,
 } = require("../agents/providers/meta.provider");
 const {
@@ -78,6 +77,7 @@ const INBOUND_WELCOME_TEMPLATE =
   "Oi {nome}, tudo bem? Eu sou a Clara, consultora virtual da SMG. Vou te acompanhar por aqui para montar seu diagnostico operacional.";
 const INBOUND_FORM_LINK_TEMPLATE =
   "Para comecarmos, preencha esse formulario rapido para eu personalizar sua analise:\n{form_link}";
+const AI_TEXT_MAX_CHARS = 420;
 
 function logWf2(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -302,7 +302,16 @@ async function resolveAgentForLead(lead) {
   return getAgentOrThrow(slug);
 }
 
-async function sendLeadText({ agent, provider, lead, text, forceTemplateName = "" }) {
+async function sendLeadText({
+  agent,
+  provider,
+  lead,
+  text,
+  forceTemplateName = "",
+  rewriteWithAi = true,
+  rewritePurpose = "wf2_outbound_text",
+  rewriteMustInclude = [],
+}) {
   if (!env.allowOutboundMessages) {
     return {
       suppressed: true,
@@ -311,10 +320,21 @@ async function sendLeadText({ agent, provider, lead, text, forceTemplateName = "
   }
 
   const normalizedProvider = normalizeProvider(provider || agent.defaultProvider) || agent.defaultProvider;
-  const safeText = textOrEmpty(text);
+  let safeText = textOrEmpty(text);
   const destination = lead.telefone;
   if (!destination || !safeText) {
     throw new Error("Lead sem telefone ou texto vazio para envio.");
+  }
+
+  if (rewriteWithAi) {
+    safeText = await rewriteWf2TextWithAi({
+      text: safeText,
+      workflow: resolveWorkflow(agent?.workflow || "smg"),
+      lead,
+      purpose: rewritePurpose,
+      maxChars: AI_TEXT_MAX_CHARS,
+      mustInclude: Array.isArray(rewriteMustInclude) ? rewriteMustInclude : [],
+    });
   }
 
   const { config: providerConfig } = getAgentProviderConfig(agent, normalizedProvider);
@@ -323,23 +343,14 @@ async function sendLeadText({ agent, provider, lead, text, forceTemplateName = "
     const insideWindow = isInside24hWindow(lead);
 
     if (!insideWindow && templateName) {
-      return sendMetaTemplateMessage(providerConfig, {
-        to: destination,
-        templateName,
-        parameters: [lead.nome || "Cliente"],
-      });
+      throw new Error(
+        "Janela de 24h fechada para envio de texto e template bloqueado em modo OpenAI-only."
+      );
     }
 
     try {
       return await sendMetaTextMessage(providerConfig, { to: destination, text: safeText });
     } catch (error) {
-      if (!insideWindow && templateName) {
-        return sendMetaTemplateMessage(providerConfig, {
-          to: destination,
-          templateName,
-          parameters: [lead.nome || "Cliente"],
-        });
-      }
       throw error;
     }
   }
@@ -979,6 +990,7 @@ async function processAnalysisForLead({
       provider,
       lead: currentLead,
       text: ackText,
+      rewriteWithAi: false,
     });
     await waitAnalysisSequenceDelay();
 
@@ -1048,6 +1060,7 @@ async function processAnalysisForLead({
       provider,
       lead: currentLead,
       text: introText,
+      rewriteWithAi: false,
     });
     await waitAnalysisSequenceDelay();
 
@@ -1098,6 +1111,7 @@ async function processAnalysisForLead({
       provider,
       lead: currentLead,
       text: followupText,
+      rewriteWithAi: false,
     });
 
     const now = new Date();
@@ -1535,34 +1549,157 @@ function resolveWf2FormLink(value = "") {
   return raw;
 }
 
-function buildInboundWelcomeMessages({ lead, agent }) {
-  const firstName = toShortFirstName(lead?.nome || "");
-  const formLink = resolveWf2FormLink(agent?.formLink);
-  const welcomeText = INBOUND_WELCOME_TEMPLATE.replace("{nome}", firstName);
-  const formLinkText = INBOUND_FORM_LINK_TEMPLATE.replace("{form_link}", formLink);
-  return [welcomeText, formLinkText];
+async function rewriteWf2TextWithAi({
+  text,
+  workflow,
+  lead = null,
+  purpose = "mensagem_operacional",
+  maxChars = AI_TEXT_MAX_CHARS,
+  mustInclude = [],
+}) {
+  const sourceText = textOrEmpty(text);
+  if (!sourceText) {
+    throw new Error("Texto base vazio para reescrita via OpenAI.");
+  }
+
+  const userPrompt = [
+    "Reescreva a mensagem abaixo para WhatsApp comercial.",
+    "Objetivo: manter a mesma intencao operacional do texto base.",
+    "Regras:",
+    "- pt-BR natural, humano, consultivo e curto.",
+    "- sem markdown, sem listas, sem emoji.",
+    `- no maximo ${Number(maxChars || AI_TEXT_MAX_CHARS)} caracteres.`,
+    "- nao remover informacoes obrigatorias do texto base.",
+    mustInclude.length
+      ? `- obrigatorio incluir literalmente: ${mustInclude.map((item) => `"${item}"`).join(", ")}.`
+      : "- nao inventar links, horarios, status ou dados.",
+    `Contexto: workflow=${textOrEmpty(workflow) || "smg"}, finalidade=${textOrEmpty(purpose)}.`,
+    `Lead: nome=${textOrEmpty(lead?.nome) || "-"}, empresa=${textOrEmpty(lead?.empresa) || "-"}, segmento=${
+      textOrEmpty(lead?.segmento) || "-"
+    }.`,
+    "",
+    `Texto base: ${sourceText}`,
+    "",
+    "Retorne apenas a mensagem final.",
+  ].join("\n");
+
+  const aiResult = await generateAiReply({
+    systemPrompt:
+      "Voce e Clara, consultora comercial da SMG. Escreva mensagens curtas de WhatsApp com linguagem natural.",
+    userPrompt,
+    fallbackReply: "",
+    strictNoFallback: true,
+    useLangChain: false,
+    allowEnvFallback: true,
+    model: env.openaiModel || "gpt-4o-mini",
+    apiKey: env.openaiApiKey || "",
+  });
+
+  const finalText = textOrEmpty(aiResult?.text);
+  if (!finalText) {
+    throw new Error("OpenAI retornou mensagem vazia na reescrita operacional.");
+  }
+  if (Number(maxChars || 0) > 0 && finalText.length > Number(maxChars)) {
+    throw new Error("OpenAI retornou texto acima do limite na reescrita operacional.");
+  }
+  for (const required of mustInclude) {
+    const chunk = textOrEmpty(required);
+    if (chunk && !finalText.includes(chunk)) {
+      throw new Error(`OpenAI removeu informacao obrigatoria na reescrita: ${chunk}`);
+    }
+  }
+  return finalText;
 }
 
-function buildAnalysisInsightMessage({ lead, form }) {
-  const challenge = textOrEmpty(form?.maiorDesafio || form?.descricaoOperacao || "");
-  const urgency = textOrEmpty(form?.urgencia || "");
-  const tools = textOrEmpty(form?.ferramentas || "");
-  const fallback =
-    "Identifiquei dois pontos importantes: existe espaco para melhorar a previsibilidade da operacao e reduzir perdas silenciosas no dia a dia.";
+async function buildInboundWelcomeMessages({ lead, agent, workflow }) {
+  const firstName = toShortFirstName(lead?.nome || "");
+  const formLink = resolveWf2FormLink(agent?.formLink);
+  const fallbackMsg1 = INBOUND_WELCOME_TEMPLATE.replace("{nome}", firstName);
+  const fallbackMsg2 = INBOUND_FORM_LINK_TEMPLATE.replace("{form_link}", formLink);
 
-  let primaryInsight = fallback;
-  if (challenge) {
-    primaryInsight = `Identifiquei um ponto que se destaca: ${clipText(challenge, 180)}.`;
-  } else if (urgency) {
-    primaryInsight = `Pelo nivel de urgencia (${urgency}), vale priorizar ajustes de processo que tragam ganho rapido sem aumentar retrabalho.`;
+  const aiPrompt = [
+    "Gere duas mensagens curtas de WhatsApp para primeiro contato inbound da Clara (SMG).",
+    'Saida obrigatoria em JSON: {"msg1":"...","msg2":"..."}',
+    "Regras:",
+    "- msg1: boas-vindas com apresentacao da Clara e da SMG.",
+    "- msg2: convite direto para preencher formulario com o link oficial.",
+    `- msg2 deve conter literalmente este link: ${formLink}.`,
+    "- sem agendamento, sem PDF, sem pergunta de qualificacao.",
+    "- pt-BR natural, sem emoji e sem markdown.",
+    "",
+    `Nome do lead: ${firstName}.`,
+    `Empresa: ${textOrEmpty(lead?.empresa) || "-"}.`,
+    `Fallback msg1: ${fallbackMsg1}`,
+    `Fallback msg2: ${fallbackMsg2}`,
+  ].join("\n");
+
+  const aiResult = await generateAiReply({
+    systemPrompt:
+      "Voce escreve mensagens comerciais curtas no WhatsApp para a Clara da SMG.",
+    userPrompt: aiPrompt,
+    fallbackReply: "{}",
+    strictNoFallback: true,
+    useLangChain: false,
+    allowEnvFallback: true,
+    model: env.openaiModel || "gpt-4o-mini",
+    apiKey: env.openaiApiKey || "",
+  });
+
+  const parsed = parseJsonObjectFromText(aiResult?.text);
+  const msg1 = textOrEmpty(parsed?.msg1);
+  const msg2 = textOrEmpty(parsed?.msg2);
+  if (!msg1 || !msg2) {
+    throw new Error("OpenAI retornou JSON invalido para boas-vindas inbound.");
+  }
+  if (!msg2.includes(formLink)) {
+    throw new Error("OpenAI nao incluiu o link oficial do formulario na msg2 inbound.");
   }
 
-  let secondaryInsight = "";
-  if (tools) {
-    secondaryInsight = ` Pelo uso atual de ${clipText(tools, 80)}, tambem vejo oportunidade de padronizar o acompanhamento para ganhar consistencia.`;
-  }
+  const finalMsg1 = await rewriteWf2TextWithAi({
+    text: msg1,
+    workflow,
+    lead,
+    purpose: "inbound_welcome_msg1",
+    maxChars: 260,
+  });
+  const finalMsg2 = await rewriteWf2TextWithAi({
+    text: msg2,
+    workflow,
+    lead,
+    purpose: "inbound_welcome_msg2",
+    maxChars: 360,
+    mustInclude: [formLink],
+  });
 
-  return `${primaryInsight}${secondaryInsight} Conseguiu abrir o arquivo ai? Me confirma pra eu te explicar com mais profundidade.`;
+  return [finalMsg1, finalMsg2];
+}
+
+async function buildOptOutReplyMessage({ workflow, lead }) {
+  const aiResult = await generateAiReply({
+    systemPrompt:
+      "Voce e Clara, do time comercial da SMG. Responda em pt-BR curto e humano.",
+    userPrompt: [
+      "Escreva uma mensagem curta para confirmar opt-out do lead.",
+      "Objetivo: confirmar que os contatos serao encerrados agora e que ele pode chamar no futuro se quiser retomar.",
+      "Regras: 1 mensagem, ate 220 caracteres, sem emoji, sem markdown.",
+      `Lead: nome=${textOrEmpty(lead?.nome) || "-"}, empresa=${textOrEmpty(lead?.empresa) || "-"}.`,
+      "Retorne apenas a mensagem final.",
+    ].join("\n"),
+    fallbackReply: "",
+    strictNoFallback: true,
+    useLangChain: false,
+    allowEnvFallback: true,
+    model: env.openaiModel || "gpt-4o-mini",
+    apiKey: env.openaiApiKey || "",
+  });
+
+  return rewriteWf2TextWithAi({
+    text: aiResult?.text || "",
+    workflow,
+    lead,
+    purpose: "opt_out_confirmation",
+    maxChars: 220,
+  });
 }
 
 function buildInboundCompanyName(phoneNumber) {
@@ -1747,6 +1884,10 @@ async function registerInboundMessageEvent({
   });
 
   if (OPT_OUT_REGEX.test(String(messageText || ""))) {
+    const optOutReply = await buildOptOutReplyMessage({
+      workflow,
+      lead: updatedLead,
+    });
     await tables.lead.update({
       where: { id: updatedLead.id },
       data: {
@@ -1774,8 +1915,7 @@ async function registerInboundMessageEvent({
       foundLead: true,
       suppressAi: true,
       reason: "opt_out",
-      immediateReply:
-        "Perfeito, vou encerrar os contatos por aqui. Se quiser retomar no futuro, e so me chamar.",
+      immediateReply: optOutReply,
       lead: updatedLead,
     };
   }
@@ -1872,9 +2012,10 @@ async function registerInboundMessageEvent({
 
   if (shouldSendInboundWelcomeForm) {
     const agent = await resolveAgentForLead(leadForNextStep);
-    const immediateReplies = buildInboundWelcomeMessages({
+    const immediateReplies = await buildInboundWelcomeMessages({
       lead: leadForNextStep,
       agent,
+      workflow,
     });
     const nowIso = new Date().toISOString();
 
@@ -2486,20 +2627,33 @@ async function startOutboundFromCommand({
   const tables = getWorkflowTables(prisma, workflow);
   const normalizedPhone = normalizeE164(phoneNumber);
   if (!normalizedPhone) {
+    const immediateReply = await rewriteWf2TextWithAi({
+      text: "Nao consegui identificar seu numero para iniciar o teste outbound.",
+      workflow,
+      lead: null,
+      purpose: "start_command_invalid_phone",
+      maxChars: 220,
+    });
     return {
       processed: false,
       reason: "invalid_phone",
-      immediateReply: "Nao consegui identificar seu numero para iniciar o teste outbound.",
+      immediateReply,
     };
   }
 
   const parsedSegment = resolveStartSegment(segmentHint);
   if (parsedSegment.hasSegmentHint && !parsedSegment.segment) {
+    const immediateReply = await rewriteWf2TextWithAi({
+      text: "Segmento invalido no /start. Use, por exemplo, /start=dentista, /start=barbearia ou /start=restaurante.",
+      workflow,
+      lead: null,
+      purpose: "start_command_invalid_segment",
+      maxChars: 260,
+    });
     return {
       processed: false,
       reason: "invalid_segment",
-      immediateReply:
-        "Segmento invalido no /start. Use, por exemplo, /start=dentista, /start=barbearia ou /start=restaurante.",
+      immediateReply,
     };
   }
 
@@ -2609,10 +2763,17 @@ async function startOutboundFromCommand({
   });
 
   if (!outboundResult?.processed) {
-    const immediateReply =
+    const baseReply =
       outboundResult?.reason === "outbound_disabled"
         ? "O comando /start foi recebido, mas o envio outbound esta desativado na configuracao."
         : "Recebi o /start, mas nao consegui iniciar o outbound agora. Tenta novamente em instantes.";
+    const immediateReply = await rewriteWf2TextWithAi({
+      text: baseReply,
+      workflow,
+      lead,
+      purpose: "start_command_not_started",
+      maxChars: 240,
+    });
     return {
       processed: false,
       reason: outboundResult?.reason || "outbound_not_started",
