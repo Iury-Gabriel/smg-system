@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const path = require("path");
 const { getWorkflowTables } = require("../../services/workflow-data-access.service");
+const { buildPhoneCandidates: buildWf2PhoneCandidates } = require("../../services/wf2/helpers");
 
 const FORM_LINK =
   process.env.AGENT_DEFAULT_SDR_FORM_LINK === "https://smg.com.br/diagnostico"
@@ -19,23 +20,7 @@ function normalizeDigits(value) {
 }
 
 function buildPhoneCandidates(rawPhone) {
-  const digits = normalizeDigits(rawPhone);
-  if (!digits) return [];
-
-  const candidates = new Set([digits, `+${digits}`]);
-  if (!digits.startsWith("55") && digits.length >= 10) {
-    candidates.add(`55${digits}`);
-    candidates.add(`+55${digits}`);
-  }
-  if (digits.startsWith("55")) {
-    const withoutCountry = digits.slice(2);
-    if (withoutCountry.length >= 10) {
-      candidates.add(withoutCountry);
-      candidates.add(`+${withoutCountry}`);
-    }
-  }
-
-  return [...candidates];
+  return buildWf2PhoneCandidates(rawPhone);
 }
 
 function mergeDadosBrutos(existing, patch) {
@@ -54,14 +39,38 @@ function mergeDadosBrutos(existing, patch) {
 async function findLeadByPhone(tables, rawPhone) {
   const candidates = buildPhoneCandidates(rawPhone);
   if (!candidates.length) return null;
-  return tables.lead.findFirst({
+  const leads = await tables.lead.findMany({
     where: {
       telefone: {
         in: candidates,
       },
     },
     orderBy: { criadoEm: "desc" },
+    take: 20,
   });
+  if (!leads.length) return null;
+
+  const terminalStatuses = new Set(["DIAGNOSTICO_AGENDADO", "DESQUALIFICADO"]);
+  const scored = leads
+    .map((lead) => {
+      const status = String(lead?.status || "").trim().toUpperCase();
+      const wf2 = lead?.dadosBrutos?.wf2 || {};
+      let score = 0;
+
+      if (!terminalStatuses.has(status)) score += 1000;
+      if (Boolean(lead?.automationActive)) score += 300;
+      if (status === "ANALISE_ENVIADA") score += 200;
+      if (status === "FORMULARIO_RESPONDIDO") score += 150;
+      if (status === "FORMULARIO_ENVIADO") score += 120;
+      if (status === "NOVO_LEAD") score += 80;
+      if (Boolean(wf2?.analysisReadConfirmedAt)) score += 40;
+      if (Boolean(wf2?.analysisAwaitingReadConfirmation)) score -= 10;
+
+      return { lead, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0].lead;
 }
 
 function buildLeadSummary(lead) {
