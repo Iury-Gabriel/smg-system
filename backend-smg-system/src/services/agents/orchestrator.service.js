@@ -41,10 +41,6 @@ const WF2_MIN_POST_READ_INTERACTIONS = Math.max(
   0,
   Number(process.env.WF2_MIN_POST_READ_INTERACTIONS || 2)
 );
-const WF2_PERMISSION_POST_READ_INTERACTIONS = Math.max(
-  WF2_MIN_POST_READ_INTERACTIONS + 1,
-  Number(process.env.WF2_PERMISSION_POST_READ_INTERACTIONS || 3)
-);
 
 function logOrchestrator(level, event, payload = {}) {
   const stamp = new Date().toISOString();
@@ -388,8 +384,6 @@ function mapWf2OperationalContext(lead = null) {
     const count = Number(analysis.post_read_interaction_count || 0);
     if (count < WF2_MIN_POST_READ_INTERACTIONS) {
       nextAction = "aprofundar_antes_de_agendar_sem_horarios";
-    } else if (count < WF2_PERMISSION_POST_READ_INTERACTIONS) {
-      nextAction = "pedir_permissao_para_enviar_horarios";
     } else {
       nextAction = "converter_para_diagnostico_com_2_horarios";
     }
