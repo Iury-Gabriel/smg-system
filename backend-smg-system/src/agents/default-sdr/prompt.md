@@ -137,6 +137,8 @@ Se o lead repetir resposta:
 
 - so avancar para horario quando `next_action=converter_para_diagnostico_com_2_horarios`
 - sempre oferecer 2 opcoes em 2 dias diferentes
+- usar `config.agora_local` e `config.timezone` como referencia de tempo atual
+- nunca sugerir horario que ja passou no dia atual do lead (ex.: se agora for 15:00, nao oferecer 10:00 no mesmo dia)
 - apos escolha, confirmar horario e solicitar email
 - explicar proximos passos de forma curta
 - nunca deixar implito que ja agendou sem tool

@@ -13,7 +13,13 @@ const { generateAiReply } = require("../../lib/ai-client");
 const { buildTypingChunks } = require("../../utils/whatsapp-message");
 const { normalizePhone, textOrEmpty } = require("./helpers");
 const { getWorkflowTables } = require("../workflow-data-access.service");
-const { buildPhoneCandidates, normalizeE164, isWithinAutomationSchedule } = require("../wf2/helpers");
+const {
+  buildPhoneCandidates,
+  normalizeE164,
+  isWithinAutomationSchedule,
+  normalizeAllowedDays,
+  parseTimeToMinutes,
+} = require("../wf2/helpers");
 const { getAgentOrThrow, getAgentProviderConfig } = require("./registry.service");
 const {
   sendMetaTextMessage,
@@ -134,12 +140,258 @@ function containsScheduleOffering(text = "") {
   );
 }
 
-function sanitizeScheduleOfferingByNextAction({ text = "", nextAction = "" }) {
+function toPtWeekdayShort(value = "") {
+  const short = String(value || "").trim().toLowerCase();
+  if (short.startsWith("mon")) return "seg";
+  if (short.startsWith("tue")) return "ter";
+  if (short.startsWith("wed")) return "qua";
+  if (short.startsWith("thu")) return "qui";
+  if (short.startsWith("fri")) return "sex";
+  if (short.startsWith("sat")) return "sab";
+  if (short.startsWith("sun")) return "dom";
+  return "";
+}
+
+function ptWeekdayFullFromShort(value = "") {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "seg") return "segunda";
+  if (token === "ter") return "terca";
+  if (token === "qua") return "quarta";
+  if (token === "qui") return "quinta";
+  if (token === "sex") return "sexta";
+  if (token === "sab") return "sabado";
+  if (token === "dom") return "domingo";
+  return "";
+}
+
+function parseHourMinuteFromText(text = "") {
+  const slots = [];
+  const seen = new Set();
+  const raw = String(text || "");
+  const pushSlot = (hour, minute = 0) => {
+    const h = Number(hour);
+    const m = Number(minute);
+    if (!Number.isInteger(h) || h < 0 || h > 23) return;
+    if (!Number.isInteger(m) || m < 0 || m > 59) return;
+    const total = h * 60 + m;
+    if (seen.has(total)) return;
+    seen.add(total);
+    slots.push(total);
+  };
+
+  const colonRegex = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
+  for (const match of raw.matchAll(colonRegex)) {
+    pushSlot(match[1], match[2]);
+  }
+
+  const hRegex = /\b([01]?\d|2[0-3])h([0-5]\d)?\b/gi;
+  for (const match of raw.matchAll(hRegex)) {
+    pushSlot(match[1], match[2] || 0);
+  }
+
+  const asHourRegex = /\bas\s+([01]?\d|2[0-3])\b/gi;
+  for (const match of raw.matchAll(asHourRegex)) {
+    pushSlot(match[1], 0);
+  }
+
+  return slots;
+}
+
+function pickSlotMinutesForWindow(startMinutes, endMinutes) {
+  const preferred = [600, 900, 1020]; // 10:00, 15:00, 17:00
+  const fits = preferred.filter((item) => item >= startMinutes && item <= endMinutes);
+  if (fits.length >= 2) return fits.slice(0, 2);
+  if (fits.length === 1) {
+    const first = fits[0];
+    const fallback = Math.min(endMinutes, Math.max(startMinutes, first + 120));
+    if (fallback !== first) return [first, fallback];
+    const earlier = Math.max(startMinutes, first - 120);
+    return earlier !== first ? [earlier, first] : [first, first];
+  }
+  const first = Math.min(endMinutes, Math.max(startMinutes, 600));
+  const second = Math.min(endMinutes, Math.max(startMinutes, first + 120));
+  if (second !== first) return [first, second];
+  return [first, first];
+}
+
+function formatFutureSlotLabel({ date, minutes, timezone }) {
+  const hour = Math.floor(minutes / 60);
+  const minute = minutes % 60;
+  const weekdayShort = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+  }).format(date);
+  const weekdayToken = toPtWeekdayShort(weekdayShort);
+  const weekday = ptWeekdayFullFromShort(weekdayToken) || "dia util";
+  const dayMonth = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: timezone,
+    day: "2-digit",
+    month: "2-digit",
+  }).format(date);
+  const minuteLabel = minute ? `${String(minute).padStart(2, "0")}` : "00";
+  return `${weekday} (${dayMonth}) as ${String(hour).padStart(2, "0")}:${minuteLabel}`;
+}
+
+function buildFutureScheduleOffer(scheduleContext = {}) {
+  const timezone = textOrEmpty(scheduleContext?.timezone) || "America/Sao_Paulo";
+  const allowedDays = normalizeAllowedDays(scheduleContext?.dias_permitidos);
+  const startMinutes = parseTimeToMinutes(scheduleContext?.horario_inicio, "08:00");
+  const endMinutes = parseTimeToMinutes(scheduleContext?.horario_fim, "20:00");
+  const [slotMinuteA, slotMinuteB] = pickSlotMinutesForWindow(startMinutes, endMinutes);
+
+  const targetDays = [];
+  const now = new Date();
+  for (let offset = 1; offset <= 14 && targetDays.length < 2; offset += 1) {
+    const candidate = new Date(now.getTime() + offset * 24 * 60 * 60 * 1000);
+    const weekdayShort = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      weekday: "short",
+    }).format(candidate);
+    const weekdayToken = toPtWeekdayShort(weekdayShort);
+    if (!allowedDays.includes(weekdayToken)) continue;
+    targetDays.push(candidate);
+  }
+
+  if (targetDays.length < 2) {
+    targetDays.push(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+    targetDays.push(new Date(now.getTime() + 48 * 60 * 60 * 1000));
+  }
+
+  const slot1 = formatFutureSlotLabel({
+    date: targetDays[0],
+    minutes: slotMinuteA,
+    timezone,
+  });
+  const slot2 = formatFutureSlotLabel({
+    date: targetDays[1],
+    minutes: slotMinuteB,
+    timezone,
+  });
+
+  return `Perfeito. Para te passar opcoes reais a partir de agora, consigo ${slot1} ou ${slot2}. Qual funciona melhor pra voce?`;
+}
+
+function sanitizeScheduleOfferingByNextAction({
+  text = "",
+  nextAction = "",
+  scheduleContext = null,
+}) {
   const safeText = textOrEmpty(text);
   const action = String(nextAction || "").trim();
   if (!safeText) return safeText;
   if (!action) return safeText;
-  return safeText;
+  if (action !== "converter_para_diagnostico_com_2_horarios") return safeText;
+  if (!containsScheduleOffering(safeText)) return safeText;
+
+  const nowLocalTime = textOrEmpty(scheduleContext?.agora_local?.hora);
+  const nowLocalWeekday = textOrEmpty(scheduleContext?.agora_local?.weekday);
+  const hasNowContext = Boolean(nowLocalTime && nowLocalWeekday);
+  if (!hasNowContext) return safeText;
+
+  const currentWeekday = String(nowLocalWeekday || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/-feira/g, "")
+    .trim();
+  const normalized = String(safeText || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  const offeredMinutes = parseHourMinuteFromText(normalized);
+  if (!offeredMinutes.length) return safeText;
+
+  const nowMinutes = parseTimeToMinutes(nowLocalTime, "00:00");
+  const referencesToday =
+    normalized.includes("hoje") ||
+    (currentWeekday && normalized.includes(currentWeekday));
+  if (!referencesToday) return safeText;
+
+  const hasPastOrCurrentSlotToday = offeredMinutes.some((value) => value <= nowMinutes + 15);
+  if (!hasPastOrCurrentSlotToday) return safeText;
+
+  return buildFutureScheduleOffer(scheduleContext || {});
+}
+
+function resolveLocalNowContext(timezone = "America/Sao_Paulo", now = new Date()) {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: timezone,
+    weekday: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+
+  const map = {};
+  for (const part of parts) {
+    map[part.type] = part.value;
+  }
+
+  return {
+    weekday: textOrEmpty(map.weekday),
+    data: `${map.day || "01"}/${map.month || "01"}/${map.year || "1970"}`,
+    hora: `${map.hour || "00"}:${map.minute || "00"}`,
+    now_utc_iso: now.toISOString(),
+  };
+}
+
+async function resolveAutomationScheduleContext({ prisma, workflow, now = new Date() }) {
+  const fallbackTimezone = "America/Sao_Paulo";
+  const fallbackAllowedDays = ["seg", "ter", "qua", "qui", "sex"];
+  const fallbackStart = "08:00";
+  const fallbackEnd = "20:00";
+
+  try {
+    if (!prisma?.configAutomacao?.findUnique) {
+      return {
+        horario_valido: true,
+        timezone: fallbackTimezone,
+        dias_permitidos: fallbackAllowedDays,
+        horario_inicio: fallbackStart,
+        horario_fim: fallbackEnd,
+        agora_local: resolveLocalNowContext(fallbackTimezone, now),
+      };
+    }
+
+    const config = await prisma.configAutomacao.findUnique({
+      where: {
+        workflow,
+      },
+    });
+
+    const timezone = textOrEmpty(config?.timezone) || fallbackTimezone;
+    const diasPermitidos = normalizeAllowedDays(config?.diasPersonalizados);
+    const horarioInicio = textOrEmpty(config?.horarioInicio) || fallbackStart;
+    const horarioFim = textOrEmpty(config?.horarioFim) || fallbackEnd;
+    const horarioValido = config ? Boolean(isWithinAutomationSchedule(config, now)) : true;
+
+    return {
+      horario_valido: horarioValido,
+      timezone,
+      dias_permitidos: diasPermitidos,
+      horario_inicio: horarioInicio,
+      horario_fim: horarioFim,
+      agora_local: resolveLocalNowContext(timezone, now),
+    };
+  } catch (_error) {
+    return {
+      horario_valido: true,
+      timezone: fallbackTimezone,
+      dias_permitidos: fallbackAllowedDays,
+      horario_inicio: fallbackStart,
+      horario_fim: fallbackEnd,
+      agora_local: resolveLocalNowContext(fallbackTimezone, now),
+    };
+  }
+}
+
+async function resolveHorarioValido({ prisma, workflow }) {
+  const scheduleContext = await resolveAutomationScheduleContext({ prisma, workflow });
+  return scheduleContext;
 }
 
 function normalizeForComparison(text = "") {
@@ -397,21 +649,6 @@ function mapWf2OperationalContext(lead = null) {
   };
 }
 
-async function resolveHorarioValido({ prisma, workflow }) {
-  try {
-    if (!prisma?.configAutomacao?.findUnique) return true;
-    const config = await prisma.configAutomacao.findUnique({
-      where: {
-        workflow,
-      },
-    });
-    if (!config) return true;
-    return Boolean(isWithinAutomationSchedule(config, new Date()));
-  } catch (_error) {
-    return true;
-  }
-}
-
 async function buildInboundPayloadContext({
   agent,
   workflow,
@@ -444,6 +681,7 @@ async function buildInboundPayloadContext({
 
   const status = textOrEmpty(lead?.status || "NOVO_LEAD");
   const wf2Context = mapWf2OperationalContext(lead);
+  const scheduleContext = await resolveHorarioValido({ prisma, workflow });
   const payload = {
     lead: {
       status: status || "NOVO_LEAD",
@@ -463,7 +701,17 @@ async function buildInboundPayloadContext({
     config: {
       etapa_atual: resolveEtapaAtualFromStatus(status),
       pipeline_origin: textOrEmpty(lead?.pipelineOrigin || "automacao"),
-      horario_valido: await resolveHorarioValido({ prisma, workflow }),
+      horario_valido: Boolean(scheduleContext?.horario_valido),
+      timezone: textOrEmpty(scheduleContext?.timezone || "America/Sao_Paulo"),
+      dias_permitidos: Array.isArray(scheduleContext?.dias_permitidos)
+        ? scheduleContext.dias_permitidos
+        : ["seg", "ter", "qua", "qui", "sex"],
+      horario_inicio: textOrEmpty(scheduleContext?.horario_inicio || "08:00"),
+      horario_fim: textOrEmpty(scheduleContext?.horario_fim || "20:00"),
+      agora_local:
+        scheduleContext?.agora_local && typeof scheduleContext.agora_local === "object"
+          ? scheduleContext.agora_local
+          : resolveLocalNowContext("America/Sao_Paulo"),
     },
   };
 
@@ -1386,6 +1634,7 @@ async function processBufferedConversation(jobPayload) {
     const replyTextFinal = sanitizeScheduleOfferingByNextAction({
       text: replyTextAfterClaimGuard,
       nextAction: nextActionForGuard,
+      scheduleContext: inboundContext?.payload?.config || null,
     });
     if (replyTextFinal !== replyTextAfterClaimGuard) {
       logOrchestrator("warn", "buffer.process.reply_schedule_offering_sanitized", {
